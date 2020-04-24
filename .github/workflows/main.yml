@@ -12,11 +12,7 @@ jobs:
       uses: actions/checkout@v2
 
     - name: Checkout mathlib
-      uses: actions/checkout@v2
-      run: git fetch --prune --unshallow
-      with:
-        repository: leanprover-community/mathlib
-        path: mathlib
+      run: git checkout https://github.com/leanprover-community/mathlib
 
     - name: Setup Python
       uses: actions/setup-python@v1
