@@ -45,8 +45,7 @@ def get_deletable_blobs():
     return deletable
 
 def delete_azure_blob(blob):
-    print('disabled for testing')
-    #container_client.delete_blob(blob)
+    container_client.delete_blob(blob)
 
 def delete_azure_blobs(blobs):
     for b in blobs:
