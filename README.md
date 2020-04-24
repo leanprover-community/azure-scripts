@@ -1,2 +1,3 @@
 # azure-scripts
-scripts and cron jobs for Azure
+
+This repo exists only for a scheduled cron job to clean up the olean archives on Azure.
