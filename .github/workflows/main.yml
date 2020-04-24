@@ -13,6 +13,7 @@ jobs:
 
     - name: Checkout mathlib
       uses: actions/checkout@v2
+      run: git fetch --prune --unshallow
       with:
         repository: leanprover-community/mathlib
         path: mathlib
@@ -24,8 +25,6 @@ jobs:
 
     - name: Install python packages
       run: |
-        pwd
-        ls
         python -m pip install --upgrade pip
         pip install gitpython azure-storage-blob
 
