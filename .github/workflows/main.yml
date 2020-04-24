@@ -1,12 +1,15 @@
 on:
   schedule:
-   - cron: '*/5 * * * *'
+   - cron: '*/2 * * * *'
 
 jobs:
   delete_old_archives:
     runs-on: ubuntu-latest
     name: A job to delete old archives from Azure
     steps:
+
+    - name: Checkout scripts
+      uses: actions/checkout@v2
 
     - name: Checkout mathlib
       uses: actions/checkout@v2
