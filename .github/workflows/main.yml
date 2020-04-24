@@ -12,7 +12,7 @@ jobs:
       uses: actions/checkout@v2
 
     - name: Checkout mathlib
-      run: git checkout https://github.com/leanprover-community/mathlib
+      run: git clone https://github.com/leanprover-community/mathlib
 
     - name: Setup Python
       uses: actions/setup-python@v1
