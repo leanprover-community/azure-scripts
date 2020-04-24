@@ -1,0 +1,28 @@
+on:
+  schedule:
+   - cron: */5 * * * *'
+
+jobs:
+  delete_old_archives:
+    runs-on: ubuntu-latest
+    name: A job to delete old archives from Azure
+    steps:
+
+    - name: Checkout mathlib
+      uses: actions/checkout@v2
+      with:
+        repository: leanprover-community/mathlib
+        path: mathlib
+
+    - name: Setup Python
+      uses: actions/setup-python@v1
+      with:
+        python-version: '3.8'
+
+    - name: Install python packages
+      run: |
+        python -m pip install --upgrade pip
+        pip install gitpython azure-storage-blob
+
+    - name: Delete archives
+      run: python cleanup.py "${{ secrets.AZURE_CONNECTION_STRING }}"
