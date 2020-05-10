@@ -1,0 +1,43 @@
+on:
+  schedule:
+   - cron: '0 2 * * *'
+  push:
+
+
+jobs:
+  release_bundles:
+    runs-on: ubuntu-latest
+    name: Release mathlib bundles
+    steps:
+
+    - name: check out script
+      uses: actions/checkout@v2
+
+    - name: install Python
+      uses: actions/setup-python@v1
+      with:
+        python-version: 3.8
+
+    - name: install Python dependencies
+      run: python -m pip install --upgrade pip urllib3 certifi requests PyGithub gitpython toml bs4 mathlibtools
+
+    - name: install Lean
+      run: |
+        curl https://raw.githubusercontent.com/Kha/elan/master/elan-init.sh -sSf | sh -s -- -y
+        echo "::add-path::$HOME/.elan/bin"
+
+    - name: install azcopy
+      run: |
+        cd /usr/local/bin
+        wget -q https://aka.ms/downloadazcopy-v10-linux -O - | sudo tar zxf - --strip-components 1 --wildcards '*/azcopy'
+        sudo chmod 755 /usr/local/bin/azcopy
+
+    - name: generate bundles
+      run: |
+        mkdir bundles
+        python3 mk_bundle.py
+        mv *.zip *.gz -t bundles
+
+    - name: push release to azure
+      run: |
+        azcopy copy "bundles" "https://oleanstorage.blob.core.windows.net/releases${{ secrets.SAS_TOKEN }}" --recursive
