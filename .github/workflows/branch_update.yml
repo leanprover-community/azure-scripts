@@ -3,7 +3,7 @@ on:
    - cron: '*/30 * * * *' # every 30 minutes
 
 jobs:
-  delete_old_archives:
+  update_lean_3x_branch:
     runs-on: ubuntu-latest
     name: Update lean-3.*.* branch
     steps:
@@ -20,5 +20,3 @@ jobs:
         branch_name="lean-$(grep -oP '\d+.\d+.\d+' leanpkg.toml)"
         echo "Updating mathlib branch $branch_name to match master"
         git push origin HEAD:refs/heads/$branch_name
-
-       
