@@ -7,7 +7,7 @@ on:
 jobs:
   build:
     name: Build, lint and update nolints
-    if: github.repository == 'leanprover-community/mathlib'
+    if: github.repository == 'leanprover-community/azure-scripts'
     runs-on: ubuntu-latest
     env:
       # number of commits to check for olean cache
