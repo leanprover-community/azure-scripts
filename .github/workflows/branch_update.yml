@@ -1,7 +1,6 @@
 on:
-  push:
-    branches-ignore:
-      - 'master'
+  schedule:
+   - cron: '*/30 * * * *' # every 30 minutes
 
 jobs:
   delete_old_archives:
@@ -20,6 +19,6 @@ jobs:
       run: |
         branch_name="lean-$(grep -oP '\d+.\d+.\d+' leanpkg.toml)"
         echo "Updating mathlib branch $branch_name to match master"
-        git push origin HEAD:refs/heads/permission-test
+        git push origin HEAD:refs/heads/$branch_name
 
        
