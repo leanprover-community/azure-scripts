@@ -1,0 +1,25 @@
+on:
+  push:
+    branches-ignore:
+      - 'master'
+
+jobs:
+  delete_old_archives:
+    runs-on: ubuntu-latest
+    name: Update lean-3.*.* branch
+    steps:
+
+    - name: checkout mathlib
+      uses: actions/checkout@v2
+      with:
+        repository: leanprover-community/mathlib
+        token: ${{ secrets.LCB_TOKEN }}
+        fetch-depth: 0
+
+    - name: update branch
+      run: |
+        branch_name="lean-$(grep -oP '\d+.\d+.\d+' leanpkg.toml)"
+        echo "Updating mathlib branch $branch_name to match master"
+        git push origin HEAD:refs/heads/permission-test
+
+       
