@@ -35,7 +35,9 @@ jobs:
 
       - name: leanpkg build
         id: build
-        run: leanpkg build -- -T100000 | python scripts/detect_errors.py
+        run: |
+          leanpkg configure
+          lean --json -T100000 --make src | python scripts/detect_errors.py
 
       - name: lint
         run: |
