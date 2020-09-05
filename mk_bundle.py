@@ -231,6 +231,7 @@ def mk_launcher() -> None:
     MAC_BASH_SCRIPT = """#!/bin/bash
     DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
     cd $DIR
+    xattr -dr com.apple.quarantine ./vscodium/VSCodium.app/
     open ./vscodium/VSCodium.app --args $DIR/src
     """
     with (DIST_MAC/'trylean').open('w') as path:
