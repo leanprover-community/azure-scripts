@@ -1,8 +1,10 @@
+name: Generate bundles
+
 on:
   schedule:
    - cron: '0 0 * * 2'
   push:
-    branches: 
+    branches:
       - master
 
 
@@ -26,7 +28,7 @@ jobs:
     - name: install Lean
       run: |
         curl https://raw.githubusercontent.com/Kha/elan/master/elan-init.sh -sSf | sh -s -- -y
-        echo "::add-path::$HOME/.elan/bin"
+        echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
     - name: install azcopy
       run: |

@@ -1,3 +1,5 @@
+name: delete old archives from Azure
+
 on:
   schedule:
    - cron: '0 1 * * *'

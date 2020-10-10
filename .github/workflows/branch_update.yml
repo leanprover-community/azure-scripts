@@ -1,3 +1,5 @@
+name: Update lean-3.*.* branch
+
 on:
   schedule:
    - cron: '*/30 * * * *' # every 30 minutes
