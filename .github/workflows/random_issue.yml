@@ -3,9 +3,6 @@ name: post triage issues on Zulip
 on:
   schedule:
    - cron: '0 14 * * *'
-  push:
-    branches:
-      - master
 
 jobs:
   post_issues:
@@ -26,5 +23,5 @@ jobs:
         python -m pip install --upgrade pip
         pip install PyGithub zulip
 
-    - name: Delete archives
+    - name: Post issue on Zulip
       run: python post_issue_on_zulip.py "${{ secrets.RANDOM_ISSUE_BOT_ZULIP_TOKEN }}" "${{ secrets.LCB_TOKEN }}"
