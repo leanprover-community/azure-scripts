@@ -24,7 +24,7 @@ jobs:
     - name: Install python packages
       run: |
         python -m pip install --upgrade pip
-        pip install gitpython zulip
+        pip install PyGithub zulip
 
     - name: Delete archives
       run: python post_issue_on_zulip.py "${{ secrets.RANDOM_ISSUE_BOT_ZULIP_TOKEN }}" "${{ secrets.LCB_TOKEN }}"
