@@ -27,7 +27,7 @@ for i in open_items:
 
 def post_random(select_from, kind):
     random_issue = random.choice(select_from)
-    topic = f'random {kind}: #{random_issue.number}'
+    topic = f'random {kind}: {random_issue.title} (#{random_issue.number})'
 
     content = f"""
 Today I chose {kind} {random_issue.number} for discussion!
