@@ -1,0 +1,30 @@
+name: post triage issues on Zulip
+
+on:
+  schedule:
+   - cron: '0 14 * * *'
+  push:
+    branches:
+      - master
+
+jobs:
+  post_issues:
+    runs-on: ubuntu-latest
+    name: A job to delete old archives from Azure
+    steps:
+
+    - name: Checkout scripts
+      uses: actions/checkout@v2
+
+    - name: Setup Python
+      uses: actions/setup-python@v1
+      with:
+        python-version: '3.8'
+
+    - name: Install python packages
+      run: |
+        python -m pip install --upgrade pip
+        pip install gitpython zulip
+
+    - name: Delete archives
+      run: python post_issue_on_zulip.py "${{ secrets.RANDOM_ISSUE_BOT_ZULIP_TOKEN }}" "${{ secrets.LCB_TOKEN }}"
