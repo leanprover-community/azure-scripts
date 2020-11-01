@@ -41,9 +41,6 @@ for i in open_items:
         else:
             open_issues.append(i)
 
-
-quit()
-
 def post_random(select_from, kind):
     random_issue = random.choice(select_from)
     topic = f'{kind} #{random_issue.number}: {random_issue.title}'
