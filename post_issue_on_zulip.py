@@ -16,8 +16,7 @@ def message_date(id):
     return zulip_client.get_message_history(id)['message_history'][0]['timestamp']
 
 posted_topics = zulip_client.get_stream_topics(zulip_client.get_stream_id('triage')['stream_id'])['topics']
-print(posted_topics)
-pattern = re.compile(r'\(#(\d+)\)$')
+pattern = re.compile(r'#(\d+)')
 posted_topics = {v[0]: message_date(t['max_id']) for (t, v) in ((t, pattern.findall(t['name'])) for t in posted_topics) if len(v) > 0}
 
 print(posted_topics)
