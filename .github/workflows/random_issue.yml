@@ -3,9 +3,6 @@ name: post triage issues on Zulip
 on:
   schedule:
    - cron: '0 14 * * *'
-  push:
-    branches:
-      - master
 
 jobs:
   post_issues:
