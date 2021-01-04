@@ -44,7 +44,7 @@ jobs:
           ./scripts/mk_all.sh
           lean --run scripts/lint_mathlib.lean
           mv nolints.txt scripts/nolints.txt
-          ./scripts/update-copy-mod-doc-exceptions.sh
+          ./scripts/update-style-exceptions.sh
           git diff
 
       - name: configure git setup
