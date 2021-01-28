@@ -30,9 +30,9 @@ open_issues = []
 
 for i in open_items:
     now = datetime.datetime.now()
-    delta = datetime.timedelta(days=14)
+    delta = datetime.timedelta(days=7)
     min_age = now - delta
-    if i.created_at < min_age \
+    if i.updated_at < min_age \
          and 'blocked-by-other-PR' not in [l.name for l in i.labels] \
              and not (i.number in posted_topics and datetime.datetime.fromtimestamp(posted_topics[i.number]) > min_age):
         if i.pull_request:
