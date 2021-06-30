@@ -26,7 +26,7 @@ def is_deletable_external(repo, sha, creation_time):
     if repo not in external_repo_info:
         new_cloned_repo = git.Repo.clone_from(f'https://{github_token}@github.com/leanprover-community/{repo}.git',repo)
         external_repo_info[repo] = {'branch_heads': set([r.commit.hexsha for r in new_cloned_repo.refs]), 'master_commits': set([c.hexsha for c in new_cloned_repo.iter_commits('master')])}
-    return sha not in external_repo_info[repo]['master_commits'] or current_time - creation_time > DURATION
+    return sha not in external_repo_info[repo]['master_commits'] or (current_time - creation_time > DURATION and sha != new_cloned_repo.rev_parse('origin/master'))
 
 def is_deletable(path, creation_time):
     if '/' not in path: # this archive came from mathlib 
