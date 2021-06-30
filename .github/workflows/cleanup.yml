@@ -27,4 +27,4 @@ jobs:
         pip install gitpython azure-storage-blob
 
     - name: Delete archives
-      run: python cleanup.py "${{ secrets.AZURE_CONNECTION_STRING }}"
+      run: python cleanup.py "${{ secrets.AZURE_CONNECTION_STRING }}" "${{ secrets.GITHUB_TOKEN }}"
