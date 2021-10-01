@@ -20,7 +20,9 @@ from git import Repo
 import toml
 from bs4 import BeautifulSoup
 
-from mathlibtools.lib import LeanProject, download
+from mathlibtools.lib import LeanProject
+import tqdm
+
 @contextmanager
 def cd(newdir):
     prevdir = os.getcwd()
@@ -84,6 +86,30 @@ def latest_release(project: str) -> str:
             max_link = link.replace(prefix, '')
     assert max_link
     return max_link
+
+class DownloadError(Exception): pass
+
+def download(url: str, target: Path) -> None:
+    """Download from url into target"""
+    log.info('Trying to download {} to {}'.format(url, target))
+    try:
+        req = requests.get(url, stream=True)
+        req.raise_for_status()
+    except ConnectionError:
+        raise DownloadError("Can't connect to " + url)
+    except requests.HTTPError:
+        raise DownloadError('Failed to download ' + url)
+    total_size = int(req.headers.get('content-length', 0))
+    BLOCK_SIZE = 1024
+    progress = tqdm(total=total_size, unit='iB', unit_scale=True)
+    with target.open('wb') as tgt:
+        for data in req.iter_content(BLOCK_SIZE):
+            progress.update(len(data))
+            tgt.write(data)
+    progress.close()
+    if total_size != 0 and progress.n != total_size:
+        raise DownloadError('Failed to download ' + url)
+
 
 def get_asset(project: str, name: str, name_re: str, target: Path) -> None:
     """
