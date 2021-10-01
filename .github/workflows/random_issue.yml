@@ -1,9 +1,8 @@
 name: post triage issues on Zulip
 
 on:
-  push:
-  # schedule:
-  #  - cron: '0 14 * * *'
+  schedule:
+   - cron: '0 14 * * *'
 
 jobs:
   post_issues:
