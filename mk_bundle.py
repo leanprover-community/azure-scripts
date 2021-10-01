@@ -21,7 +21,7 @@ import toml
 from bs4 import BeautifulSoup
 
 from mathlibtools.lib import LeanProject
-import tqdm
+from tqdm import tqdm
 
 @contextmanager
 def cd(newdir):
