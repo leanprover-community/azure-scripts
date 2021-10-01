@@ -1,11 +1,9 @@
 name: post triage issues on Zulip
 
-# Triage bot is broken
-# https://github.com/leanprover-community/azure-scripts/issues/10
-
-# on:
-#   schedule:
-#    - cron: '0 14 * * *'
+on:
+  push:
+  # schedule:
+  #  - cron: '0 14 * * *'
 
 jobs:
   post_issues:

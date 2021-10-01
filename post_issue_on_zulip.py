@@ -13,6 +13,7 @@ gh_token = sys.argv[2]
 zulip_client = zulip.Client(email="random-issue-bot@zulipchat.com", api_key=zulip_token, site="https://leanprover.zulipchat.com")
 
 def message_date(id):
+    print(zulip_client.get_message_history(id))
     return zulip_client.get_message_history(id)['message_history'][0]['timestamp']
 
 posted_topics = zulip_client.get_stream_topics(zulip_client.get_stream_id('triage')['stream_id'])['topics']
