@@ -23,7 +23,7 @@ jobs:
         python-version: 3.8
 
     - name: install Python dependencies
-      run: python -m pip install --upgrade pip urllib3 certifi requests PyGithub gitpython toml bs4 mathlibtools
+      run: python -m pip install -r requirements.txt
 
     - name: install Lean
       run: |

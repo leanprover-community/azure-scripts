@@ -1,0 +1,8 @@
+urllib3
+certifi
+requests
+PyGithub
+gitpython
+toml
+bs4
+mathlibtools
