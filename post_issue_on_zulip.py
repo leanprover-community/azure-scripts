@@ -6,6 +6,7 @@ import github
 import datetime
 import random
 import re
+import time
 
 zulip_token = sys.argv[1]
 gh_token = sys.argv[2]
@@ -13,7 +14,12 @@ gh_token = sys.argv[2]
 zulip_client = zulip.Client(email="random-issue-bot@zulipchat.com", api_key=zulip_token, site="https://leanprover.zulipchat.com")
 
 def message_date(id):
-    return zulip_client.get_message_history(id)['message_history'][0]['timestamp']
+    history = zulip_client.get_message_history(id)
+    print(history)
+    # We're limited to 200 API calls per minute, this should give us a decent amount of leeway
+    # https://zulip.com/api/rest-error-handling#rate-limit-exceeded
+    time.sleep(0.4)
+    return history['message_history'][0]['timestamp']
 
 posted_topics = zulip_client.get_stream_topics(zulip_client.get_stream_id('triage')['stream_id'])['topics']
 pattern = re.compile(r'#(\d+)')
