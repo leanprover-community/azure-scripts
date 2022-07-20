@@ -21,17 +21,17 @@ def is_deletable_mathlib(sha, creation_time):
             and sha not in mathlib_master_commits \
             and current_time - creation_time > DURATION
 
-# archives from e.g. lean-liquid are only saved if they come from recent master commits
+# archives from e.g. lean-liquid follow the same logic as mathlib
 def is_deletable_external(repo, sha, creation_time):
     if repo not in external_repo_info:
         new_cloned_repo = git.Repo.clone_from(f'https://{github_token}@github.com/leanprover-community/{repo}.git',repo)
         external_repo_info[repo] = {
             'branch_heads': set(r.commit.hexsha for r in new_cloned_repo.refs),
             'master_commits': set(c.hexsha for c in new_cloned_repo.iter_commits('master')),
-            'master_head': new_cloned_repo.rev_parse('origin/master'),
         }
-    return sha not in external_repo_info[repo]['master_commits'] or \
-        (current_time - creation_time > DURATION and sha != external_repo_info[repo]['master_head'])
+    return sha not in external_repo_info[repo]['branch_heads'] \
+        and sha not in external_repo_info[repo]['master_commits'] \
+        and current_time - creation_time > DURATION
 
 def is_deletable(path, creation_time):
     if '/' not in path: # this archive came from mathlib
