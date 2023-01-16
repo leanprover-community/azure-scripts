@@ -192,7 +192,7 @@ def get_lean_extension():
             "**/.DS_Store": true,
             "**/*.olean": true
         },
-        "lean.executablePath": "%extensionPath%/../../../../lean/bin/lean"
+        "lean.executablePath": "%extensionPath%/../../../../lean/bin/lean",
         "editor.minimap.enabled": false,
         "window.titleBarStyle": "custom",
     }
