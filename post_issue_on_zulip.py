@@ -28,7 +28,7 @@ posted_topics = {int(v[0]): message_date(t['max_id']) for (t, v) in ((t, pattern
 print(posted_topics)
 
 gh = github.Github(login_or_token=gh_token)
-mathlib = gh.get_repo('leanprover-community/mathlib')
+mathlib = gh.get_repo('leanprover-community/mathlib4')
 
 open_items = mathlib.get_issues(state='open')
 open_prs = []
