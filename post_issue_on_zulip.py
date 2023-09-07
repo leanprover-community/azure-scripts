@@ -22,7 +22,7 @@ def message_date(id):
     return history['message_history'][0]['timestamp']
 
 posted_topics = zulip_client.get_stream_topics(zulip_client.get_stream_id('triage')['stream_id'])['topics']
-pattern = re.compile(r'#(\d+)')
+pattern = re.compile(r'!4#(\d+)')
 posted_topics = {int(v[0]): message_date(t['max_id']) for (t, v) in ((t, pattern.findall(t['name'])) for t in posted_topics) if len(v) > 0}
 
 print(posted_topics)
@@ -48,12 +48,12 @@ for i in open_items:
 
 def post_random(select_from, kind):
     random_issue = random.choice(select_from)
-    topic = f'{kind} #{random_issue.number}: {random_issue.title}'
+    topic = f'{kind} !4#{random_issue.number}: {random_issue.title}'
 
     content = f"""
 Today I chose {kind} {random_issue.number} for discussion!
 
-**[{random_issue.title}](https://github.com/leanprover-community/mathlib/issues/{random_issue.number})**
+**[{random_issue.title}](https://github.com/leanprover-community/mathlib4/issues/{random_issue.number})**
 Created by @**{random_issue.user.name}** (@{random_issue.user.login}) on {random_issue.created_at.date()}
 Labels: {', '.join(l.name for l in random_issue.labels)}
 
