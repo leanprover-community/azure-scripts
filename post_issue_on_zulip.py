@@ -35,7 +35,7 @@ open_prs = []
 open_issues = []
 
 for i in open_items:
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
     delta = datetime.timedelta(days=7)
     min_age = now - delta
     if i.updated_at < min_age \
