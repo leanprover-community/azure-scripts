@@ -40,7 +40,7 @@ for i in open_items:
     min_age = now - delta
     if i.updated_at < min_age \
          and 'blocked-by-other-PR' not in [l.name for l in i.labels] \
-             and not (i.number in posted_topics and datetime.datetime.fromtimestamp(posted_topics[i.number]) > min_age):
+             and not (i.number in posted_topics and datetime.datetime.fromtimestamp(posted_topics[i.number], tz=datetime.timezone.utc) > min_age):
         if i.pull_request:
             open_prs.append(i)
         else:
