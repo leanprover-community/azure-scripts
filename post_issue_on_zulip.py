@@ -51,7 +51,7 @@ def post_random(select_from, kind):
     topic = f'{kind} !4#{random_issue.number}: {random_issue.title}'
 
     content = f"""
-Today I chose {kind} {random_issue.number} for discussion!
+Today I chose {kind} #{random_issue.number} for discussion!
 
 **[{random_issue.title}](https://github.com/leanprover-community/mathlib4/issues/{random_issue.number})**
 Created by @**{random_issue.user.name}** (@{random_issue.user.login}) on {random_issue.created_at.date()}
