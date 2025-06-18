@@ -4,7 +4,6 @@ on:
   schedule:
     - cron: '0 4 * * WED'  # Run at 04:00 UTC every Wednesday
   workflow_dispatch:
-  push:
 
 jobs:
   run-script:
