@@ -36,12 +36,14 @@ jobs:
       id: tables
       run: |
         for site in website blog
+        printf $'message<<EOF\n' | tee -a "$GITHUB_OUTPUT"
         do
           printf 'PRs in %s\n' "${site}"
           cd "${site}"
-          printf $'%s<<EOF\n%s\nEOF' "${site}" "$(./../script/formatGhPrList.sh "${site}")" | tee -a "$GITHUB_OUTPUT"
+          printf $'###  Open %s PRs\n\n%s\n\n' "${site}" "$(./../script/formatGhPrList.sh "${site}")" | tee -a "$GITHUB_OUTPUT"
           cd ..
         done
+        printf $'EOF\n' | tee -a "$GITHUB_OUTPUT"
 
     - name: Post output to Zulip
       uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
@@ -53,13 +55,7 @@ jobs:
         type: 'stream'
         topic: 'blog and website PRs'
         content: |
-          ###  Open website PRs
-
-          ${{ steps.tables.outputs.website }}
-
-          ###  Open blog PRs
-
-          ${{ steps.tables.outputs.table }}
+          ${{ steps.tables.outputs.message }}
 
   workflow-keepalive:
     if: github.event_name == 'schedule'
