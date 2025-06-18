@@ -31,6 +31,8 @@ jobs:
         path: blog
 
     - name: Produce tables
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       id: tables
       run: |
         for site in website blog
@@ -58,3 +60,11 @@ jobs:
           ###  Open blog PRs
 
           ${{ steps.tables.outputs.table }}
+
+  workflow-keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: liskin/gh-workflow-keepalive@f72ff1a1336129f29bf0166c0fd0ca6cf1bcb38c # v1.2.1
