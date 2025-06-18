@@ -35,8 +35,8 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       id: tables
       run: |
-        for site in website blog
         printf $'message<<EOF\n' | tee -a "$GITHUB_OUTPUT"
+        for site in website blog
         do
           printf 'PRs in %s\n' "${site}"
           cd "${site}"
