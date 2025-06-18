@@ -5,12 +5,20 @@ on:
     - cron: '0 4 * * WED'  # Run at 04:00 UTC every Wednesday
   workflow_dispatch:
   push:
+
 jobs:
   run-script:
     runs-on: ubuntu-latest
     if: github.repository == 'leanprover-community/azure-scripts'
 
     steps:
+    - name: Checkout script
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        repository: 'leanprover-community/azure-scripts'
+        sparse-checkout: 'formatGhPrList.sh'
+        path: script
+
     - name: Checkout website
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
@@ -30,7 +38,7 @@ jobs:
         do
           printf 'PRs in %s\n' "${site}"
           cd "${site}"
-          printf $'%s<<EOF\n%s\nEOF' "${site}" "$(./formatGhPrList.sh "${site}")" | tee -a "$GITHUB_OUTPUT"
+          printf $'%s<<EOF\n%s\nEOF' "${site}" "$(./../script/formatGhPrList.sh "${site}")" | tee -a "$GITHUB_OUTPUT"
           cd ..
         done
 
