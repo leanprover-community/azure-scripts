@@ -39,8 +39,9 @@ jobs:
         for site in website blog
         do
           printf 'PRs in %s\n' "${site}"
+          url="https://github.com/leanprover-community/$(printf '%s' "${site}" | sed 's=website=leanprover-community.github.io=')/pulls"
           cd "${site}"
-          printf $'###  Open %s PRs\n\n%s\n\n' "${site}" "$(./../script/formatGhPrList.sh "${site}")" | tee -a "$GITHUB_OUTPUT"
+          printf $'###  [Open %s PRs](%s)\n\n%s\n\n' "${site}" "${url}" "$(./../script/formatGhPrList.sh "${site}")" | tee -a "$GITHUB_OUTPUT"
           cd ..
         done
         printf $'EOF\n' | tee -a "$GITHUB_OUTPUT"
