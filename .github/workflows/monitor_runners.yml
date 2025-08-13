@@ -24,8 +24,8 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners")
           
-          # Extract offline runners
-          offline_runners=$(echo "$response" | jq -r '.runners[] | select(.status != "online") | .name')
+          # Extract offline runners with their labels
+          offline_runners=$(echo "$response" | jq -r '.runners[] | select(.status != "online") | "\(.name)|\(.labels | map(.name) | join(","))"')
           
           # Count offline runners
           offline_count=$(echo "$offline_runners" | grep -c . || echo "0")
@@ -36,11 +36,18 @@ jobs:
           # Format the list for Zulip message
           if [ "$offline_count" -gt 0 ]; then
             message="⚠️ **Self-hosted runners offline:**\n\n"
-            while IFS= read -r runner; do
-              if [ -n "$runner" ]; then
-                message="${message}- \`${runner}\`\n"
+            while IFS= read -r runner_info; do
+              if [ -n "$runner_info" ]; then
+                runner_name=$(echo "$runner_info" | cut -d'|' -f1)
+                runner_labels=$(echo "$runner_info" | cut -d'|' -f2)
+                
+                if [ -n "$runner_labels" ] && [ "$runner_labels" != "" ]; then
+                  message="${message}- \`${runner_name}\` (labels: \`${runner_labels}\`)\n"
+                else
+                  message="${message}- \`${runner_name}\` (no labels)\n"
+                fi
               fi
-            done <<< "$offline_runners"            
+            done <<< "$offline_runners"
           else
             message=""
           fi
