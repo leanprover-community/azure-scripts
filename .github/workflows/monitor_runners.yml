@@ -1,0 +1,79 @@
+name: Monitor Self-Hosted Runners
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # every 15 minutes
+  workflow_dispatch:
+
+env:
+  ZULIP_SERVER: "https://leanprover.zulipchat.com"
+  ZULIP_CHANNEL: "CI admins"
+
+jobs:
+  monitor-runners:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check self-hosted runners
+        id: check-runners
+        run: |
+          echo "Fetching organization runners..."
+          
+          # Get all self-hosted runners for the organization
+          # this token requires admin:org permissions
+          response=$(curl -s -H "Authorization: token ${{ secrets.MONITOR_RUNNERS_GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners")
+          
+          # Extract offline runners with their labels
+          offline_runners=$(echo "$response" | jq -r '.runners[] | select(.status != "online") | "\(.name)|\(.labels | map(.name) | join(","))"')
+          
+          # Count offline runners
+          offline_count=$(echo "$offline_runners" | grep -c . || echo "0")
+          
+          echo "Found $offline_count offline runners"
+          echo "offline_count=$offline_count" >> $GITHUB_OUTPUT
+          
+          # Format the list for Zulip message
+          if [ "$offline_count" -gt 0 ]; then
+            message="⚠️ **Self-hosted runners offline:**\n\n"
+            while IFS= read -r runner_info; do
+              if [ -n "$runner_info" ]; then
+                runner_name=$(echo "$runner_info" | cut -d'|' -f1)
+                runner_labels=$(echo "$runner_info" | cut -d'|' -f2)
+                
+                if [ -n "$runner_labels" ] && [ "$runner_labels" != "" ]; then
+                  message="${message}- \`${runner_name}\` (labels: \`${runner_labels}\`)\n"
+                else
+                  message="${message}- \`${runner_name}\` (no labels)\n"
+                fi
+              fi
+            done <<< "$offline_runners"
+          else
+            message=""
+          fi
+          
+          # Save message to output (escape newlines for GitHub Actions)
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$message" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Send message on Zulip
+        if: steps.check-runners.outputs.offline_count > 0
+        uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
+        with:
+          api-key: ${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}
+          email: ${{ secrets.ZULIP_MONITOR_RUNNERS_BOT_EMAIL }}
+          organization-url: ${{ env.ZULIP_SERVER }}
+          to: ${{ env.ZULIP_CHANNEL }}
+          type: 'stream'
+          topic: 'Runner Status'
+          content: |
+            ${{ steps.check-runners.outputs.message }}
+
+      - name: Log status
+        run: |
+          if [ "${{ steps.check-runners.outputs.offline_count }}" -eq 0 ]; then
+            echo "✅ All self-hosted runners are online"
+          else
+            echo "⚠️ Found ${{ steps.check-runners.outputs.offline_count }} offline runner(s)"
+          fi
