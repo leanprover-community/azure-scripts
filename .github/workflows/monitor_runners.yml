@@ -27,8 +27,12 @@ jobs:
           # Extract offline runners with their labels
           offline_runners=$(echo "$response" | jq -r '.runners[] | select(.status != "online") | "\(.name)|\(.labels | map(.name) | join(","))"')
           
-          # Count offline runners
-          offline_count=$(echo "$offline_runners" | grep -c . || echo "0")
+          # Count offline runners (count non-empty lines)
+          if [ -z "$offline_runners" ] || [ "$offline_runners" = "" ]; then
+            offline_count=0
+          else
+            offline_count=$(echo "$offline_runners" | wc -l)
+          fi
           
           echo "Found $offline_count offline runners"
           echo "offline_count=$offline_count" >> $GITHUB_OUTPUT
