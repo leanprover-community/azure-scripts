@@ -34,7 +34,7 @@ open_items = mathlib.get_issues(state='open')
 open_prs = []
 open_issues = []
 
-print(f'Found {len(open_items)} open item(s) (PRs and issues).')
+print(f'Found {open_items.totalCount} open item(s) (PRs and issues).')
 
 for i in open_items:
     now = datetime.datetime.now(tz=datetime.timezone.utc)
