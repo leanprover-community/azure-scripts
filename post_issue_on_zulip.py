@@ -34,6 +34,8 @@ open_items = mathlib.get_issues(state='open')
 open_prs = []
 open_issues = []
 
+print(f'Found {len(open_items)} open item(s) (PRs and issues).')
+
 for i in open_items:
     now = datetime.datetime.now(tz=datetime.timezone.utc)
     delta = datetime.timedelta(days=7)
@@ -46,7 +48,12 @@ for i in open_items:
         else:
             open_issues.append(i)
 
+print(f'Found {len(open_issues)} open issue(s) after filtering.')
+print(f'Found {len(open_prs)} open PR(s) after filtering.')
+
 def post_random(select_from, kind):
+    if len(select_from) == 0:
+        return
     random_issue = random.choice(select_from)
     topic = f'{kind} !4#{random_issue.number}: {random_issue.title}'
 
