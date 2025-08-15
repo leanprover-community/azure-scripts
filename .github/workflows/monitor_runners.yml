@@ -8,11 +8,27 @@ on:
 env:
   ZULIP_SERVER: "https://leanprover.zulipchat.com"
   ZULIP_CHANNEL: "CI admins"
+  STATE_FILE: "runner-state.json"
+  CACHE_KEY: "runner-monitor-state"
 
 jobs:
   monitor-runners:
     runs-on: ubuntu-latest
     steps:
+      - name: Restore previous state
+        id: cache-restore
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ env.STATE_FILE }}
+          key: ${{ env.CACHE_KEY }}
+
+      - name: Create empty state
+        if: steps.cache-restore.cache-hit != 'true'
+        id: load-state
+        run: |
+          echo "No previous state file found, creating empty state"
+          echo '{"last_run": "", "runners": {}}' > "${{ env.STATE_FILE }}"
+
       - name: Check self-hosted runners
         id: check-runners
         run: |
@@ -24,45 +40,106 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners")
           
-          # Extract offline runners with their labels
-          offline_runners=$(echo "$response" | jq -r '.runners[] | select(.status != "online") | "\(.name)|\(.labels | map(.name) | join(","))"')
+          # Load previous state
+          previous_state=$(cat "${{ env.STATE_FILE }}")
+                    
+          # Initialize arrays for notifications
+          newly_offline_runners=()
+          persistent_offline_runners=()
+          back_online_runners=()
           
-          # Count offline runners (count non-empty lines)
-          if [ -z "$offline_runners" ] || [ "$offline_runners" = "" ]; then
-            offline_count=0
-          else
-            offline_count=$(echo "$offline_runners" | wc -l)
-          fi
-          
-          echo "Found $offline_count offline runners"
-          echo "offline_count=$offline_count" >> $GITHUB_OUTPUT
-          
-          # Format the list for Zulip message
-          if [ "$offline_count" -gt 0 ]; then
-            message="⚠️ **Self-hosted runners offline:**\n\n"
-            while IFS= read -r runner_info; do
-              if [ -n "$runner_info" ]; then
-                runner_name=$(echo "$runner_info" | cut -d'|' -f1)
-                runner_labels=$(echo "$runner_info" | cut -d'|' -f2)
-                
-                if [ -n "$runner_labels" ] && [ "$runner_labels" != "" ]; then
-                  message="${message}- \`${runner_name}\` (labels: \`${runner_labels}\`)\n"
-                else
-                  message="${message}- \`${runner_name}\` (no labels)\n"
+          # Process current runners
+          echo "$response" | jq -r '.runners[] | "\(.name)|\(.status)|\(.labels | map(.name) | join(","))"' | while IFS='|' read -r name status labels; do
+            if [ -z "$name" ]; then continue; fi
+            
+            # Get previous state for this runner
+            prev_status=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].status // "unknown"')
+            prev_consecutive=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].consecutive_offline // 0')
+            
+            if [ "$status" != "online" ]; then
+              # Runner is offline
+              if [ "$prev_status" = "online" ] || [ "$prev_status" = "unknown" ]; then
+                # First time offline
+                consecutive_offline=1
+                echo "NEWLY_OFFLINE: $name (labels: $labels)" >> newly_offline.tmp
+              else
+                # Still offline, increment counter
+                consecutive_offline=$((prev_consecutive + 1))
+                if [ "$consecutive_offline" -ge 2 ]; then
+                  echo "PERSISTENT_OFFLINE: $name,$consecutive_offline,$labels" >> persistent_offline.tmp
                 fi
               fi
-            done <<< "$offline_runners"
-          else
-            message=""
+            else
+              # Runner is online
+              consecutive_offline=0
+              if [ "$prev_status" = "offline" ]; then
+                # Runner came back online
+                echo "BACK_ONLINE: $name (labels: $labels)" >> back_online.tmp
+              fi
+            fi
+            
+            # Update state for this runner
+            echo "$name,$status,$consecutive_offline,$labels" >> current_runners.tmp
+          done
+          
+          # Build new state file
+          new_state=$(echo "$previous_state" | jq --arg time "$current_time" '.last_run = $time | .runners = {}')
+          
+          if [ -f "current_runners.tmp" ]; then
+            while IFS=',' read -r name status consecutive labels; do
+              if [ -n "$name" ]; then
+                new_state=$(echo "$new_state" | jq --arg name "$name" --arg status "$status" --argjson consecutive "$consecutive" --arg labels "$labels" \
+                  '.runners[$name] = {"status": $status, "consecutive_offline": $consecutive, "labels": $labels}')
+              fi
+            done < current_runners.tmp
           fi
           
-          # Save message to output (escape newlines for GitHub Actions)
+          # Save new state
+          echo "$new_state" > "${{ env.STATE_FILE }}"
+          
+          # Prepare notification messages
+          notification_message=""
+          
+          # Check for runners that came back online
+          if [ -f "back_online.tmp" ] && [ -s "back_online.tmp" ]; then
+            notification_message+="✅ **[Runners](https://github.com/organizations/${{ github.repository_owner }}/settings/actions/runners) back online:**\n\n"
+            while IFS= read -r line; do
+              runner_info=$(echo "$line" | sed 's/BACK_ONLINE: //')
+              notification_message+="- \`$runner_info\`\n"
+            done < back_online.tmp
+            notification_message+="\n"
+          fi
+          
+          # Check for persistently offline runners (≥2 consecutive runs)
+          if [ -f "persistent_offline.tmp" ] && [ -s "persistent_offline.tmp" ]; then
+            notification_message+="⚠️ **[Runners](https://github.com/organizations/${{ github.repository_owner }}/settings/actions/runners) offline for multiple checks:**\n\n"
+            while IFS=',' read -r name consecutive labels; do
+              if [ -n "$labels" ] && [ "$labels" != "" ]; then
+                notification_message+="- \`$name\` (${consecutive} consecutive checks, labels: \`$labels\`)\n"
+              else
+                notification_message+="- \`$name\` (${consecutive} consecutive checks, no labels)\n"
+              fi
+            done < persistent_offline.tmp
+            notification_message+="\n"
+          fi
+          
+          # Set should_notify output
+          if [ -n "$notification_message" ]; then
+            echo "should_notify=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_notify=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Save message to output
           echo "message<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$message" >> $GITHUB_OUTPUT
+          echo -e "$notification_message" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          
+          # Clean up temp files
+          rm -f newly_offline.tmp persistent_offline.tmp back_online.tmp current_runners.tmp
 
       - name: Send message on Zulip
-        if: steps.check-runners.outputs.offline_count > 0
+        if: steps.check-runners.outputs.should_notify == 'true'
         uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
         with:
           api-key: ${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}
@@ -74,12 +151,23 @@ jobs:
           content: |
             ${{ steps.check-runners.outputs.message }}
 
-      - name: Log status
+      - name: Save state to cache
+        if: always()
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ env.STATE_FILE }}
+          key: ${{ env.CACHE_KEY }}
+
+      - name: Log summary
         run: |
-          if [ "${{ steps.check-runners.outputs.offline_count }}" -eq 0 ]; then
-            echo "✅ All self-hosted runners are online"
+          echo "=== Runner Monitor Summary ==="
+          echo "State file contents:"
+          cat "${{ env.STATE_FILE }}" | jq .
+          
+          if [ "${{ steps.check-runners.outputs.should_notify }}" = "true" ]; then
+            echo "📢 Notifications sent to Zulip"
           else
-            echo "⚠️ Found ${{ steps.check-runners.outputs.offline_count }} offline runner(s)"
+            echo "✅ No notifications needed - all runners stable"
           fi
 
   workflow-keepalive:
