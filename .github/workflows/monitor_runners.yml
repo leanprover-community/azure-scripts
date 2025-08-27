@@ -152,6 +152,9 @@ jobs:
           
           # Save updated stats
           echo "$new_stats" > "${{ env.STATS_FILE }}"
+
+          # Build new state file
+          new_state=$(echo "$previous_state" | jq --arg time "$current_time" '.last_run = $time | .runners = {}')
           
           if [ -f "current_runners.tmp" ]; then
             while IFS=',' read -r name status consecutive labels; do
@@ -161,6 +164,9 @@ jobs:
               fi
             done < current_runners.tmp
           fi
+
+          # Save new state
+          echo "$new_state" > "${{ env.STATE_FILE }}"
           
           # Prepare notification messages
           notification_message=""
