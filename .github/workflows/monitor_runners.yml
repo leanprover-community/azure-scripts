@@ -41,13 +41,13 @@ jobs:
           restore-keys: ${{ env.STATS_CACHE_KEY }}
 
       - name: Create empty state
-        if: steps.cache-restore.outputs.cache-hit != 'true'
+        if: steps.cache-restore.outputs.cache-hit == ''
         run: |
           echo "No previous state file found, creating empty state"
           echo '{"last_run": "", "runners": {}}' > "${{ env.STATE_FILE }}"
 
       - name: Create empty stats
-        if: steps.stats-cache-restore.outputs.cache-hit != 'true'
+        if: steps.stats-cache-restore.outputs.cache-hit == ''
         run: |
           echo "No previous stats file found, creating empty stats"
           echo '{"runners": {}, "last_cleanup": ""}' > "${{ env.STATS_FILE }}"
