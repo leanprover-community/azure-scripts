@@ -92,7 +92,7 @@ jobs:
           # Process current runners
           echo "$response" | jq -r '.runners[] | "\(.name)|\(.status)|\(.busy)|\(.labels | map(.name) | join(","))"' | while IFS='|' read -r name status busy labels; do
             if [ -z "$name" ]; then continue; fi
-            echo "Processing runner: $name"
+            echo "::group::Processing runner: $name"
             
             # Determine runner state (Idle, Active, Offline)
             if [ "$status" != "online" ]; then
@@ -135,6 +135,7 @@ jobs:
             
             # Update stats with current state
             echo "$name,$runner_state,$labels" >> current_runner_states.tmp
+            echo "::endgroup::"
           done
           
           # Update stats file with all current runner states
@@ -345,11 +346,13 @@ jobs:
       - name: Log summary
         run: |
           echo "=== Runner Monitor Summary ==="
-          echo "State file contents:"
+          echo "::group::State file contents:"
           cat "${{ env.STATE_FILE }}" | jq .
+          echo "::endgroup::"
 
-          echo "Stats file contents:"
+          echo "::group::Stats file contents:"
           cat "${{ env.STATS_FILE }}" | jq .
+          echo "::endgroup::"
           
           echo ""
           echo "=== Statistics Summary ==="
@@ -359,10 +362,11 @@ jobs:
           echo "Total data points: $data_points"
           
           echo ""
-          echo "=== 7-Day Statistics Report ==="
+          echo "::group::=== 7-Day Statistics Report ==="
           cat << 'EOF'
           ${{ steps.weekly-stats.outputs.weekly_message }}
           EOF
+          echo "::endgroup::"
           
           if [ "${{ steps.check-runners.outputs.should_notify }}" = "true" ]; then
             echo ""
