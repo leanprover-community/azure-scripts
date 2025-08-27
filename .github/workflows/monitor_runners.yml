@@ -17,8 +17,8 @@ env:
   ZULIP_CHANNEL: "CI admins"
   STATE_FILE: "runner-state.json"
   STATS_FILE: "runner-stats.json"
-  CACHE_KEY: "runner-monitor-state-v2"
-  STATS_CACHE_KEY: "runner-monitor-stats-v2"
+  CACHE_KEY: "runner-monitor-state-v3"
+  STATS_CACHE_KEY: "runner-monitor-stats-v3"
 
 jobs:
   monitor-runners:
@@ -29,23 +29,25 @@ jobs:
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ${{ env.STATE_FILE }}
-          key: ${{ env.CACHE_KEY }}
+          key: ${{ env.CACHE_KEY }}-${{ github.run_id }}
+          restore-keys: ${{ env.CACHE_KEY }}
 
       - name: Restore previous stats
         id: stats-cache-restore
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ${{ env.STATS_FILE }}
-          key: ${{ env.STATS_CACHE_KEY }}
+          key: ${{ env.STATS_CACHE_KEY }}-${{ github.run_id }}
+          restore-keys: ${{ env.STATS_CACHE_KEY }}
 
       - name: Create empty state
-        if: steps.cache-restore.outputs.cache-hit != 'true'
+        if: steps.cache-restore.outputs.cache-hit == ''
         run: |
           echo "No previous state file found, creating empty state"
           echo '{"last_run": "", "runners": {}}' > "${{ env.STATE_FILE }}"
 
       - name: Create empty stats
-        if: steps.stats-cache-restore.outputs.cache-hit != 'true'
+        if: steps.stats-cache-restore.outputs.cache-hit == ''
         run: |
           echo "No previous stats file found, creating empty stats"
           echo '{"runners": {}, "last_cleanup": ""}' > "${{ env.STATS_FILE }}"
@@ -305,14 +307,14 @@ jobs:
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ${{ env.STATE_FILE }}
-          key: ${{ env.CACHE_KEY }}
+          key: ${{ env.CACHE_KEY }}-${{ github.run_id }}
 
       - name: Save stats to cache
         if: always()
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ${{ env.STATS_FILE }}
-          key: ${{ env.STATS_CACHE_KEY }}
+          key: ${{ env.STATS_CACHE_KEY }}-${{ github.run_id }}
 
       - name: Log summary
         run: |
