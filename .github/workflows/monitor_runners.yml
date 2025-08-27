@@ -225,20 +225,33 @@ jobs:
           # Load stats
           stats=$(cat "${{ env.STATS_FILE }}")
           
-          # Calculate statistics for each runner
-          weekly_report="📊 **Weekly Runner Statistics Report**\n\n"
-          weekly_report+="_Period: Last 7 days • Generated: $(date -u +'%Y-%m-%d %H:%M UTC')_\n\n"
-          
           # Get list of runners that have data
           runners=$(echo "$stats" | jq -r '.runners | keys[]' | sort)
           
+          # Create temporary file for weekly report content
+          weekly_report_file="weekly_report.tmp"
+          
+          # Write report header
+          cat > "$weekly_report_file" << 'EOF'
+          📊 **Weekly Runner Statistics Report**
+          
+          EOF
+          
+          echo "_Period: Last 7 days • Generated: $(date -u +'%Y-%m-%d %H:%M UTC')_" >> "$weekly_report_file"
+          echo "" >> "$weekly_report_file"
+          
           if [ -z "$runners" ]; then
-            weekly_report+="No runner data available for the past 7 days.\n"
+            echo "No runner data available for the past 7 days." >> "$weekly_report_file"
           else
-            weekly_report+="| Runner | Idle | Active | Offline | Labels |\n"
-            weekly_report+="|--------|------|---------|---------|--------|\n"
+            # Write table header
+            cat >> "$weekly_report_file" << 'EOF'
+            | Runner | Idle | Active | Offline | Labels |
+            |--------|------|---------|---------|--------|
+            EOF
             
-            for runner in $runners; do
+            # Process each runner and write to temp file
+            echo "$runners" | while read -r runner; do
+              if [ -z "$runner" ]; then continue; fi
               echo "Processing stats for runner: $runner"
               
               # Calculate percentages using jq
@@ -267,20 +280,27 @@ jobs:
                 labels_display="\`$labels\`"
               fi
               
-              weekly_report+="| \`$runner\` | ${idle_pct}% | ${active_pct}% | ${offline_pct}% | $labels_display |\n"
+              echo "| \`$runner\` | ${idle_pct}% | ${active_pct}% | ${offline_pct}% | $labels_display |" >> "$weekly_report_file"
             done
             
-            weekly_report+="\n**Legend:**\n"
-            weekly_report+="• **Idle**: Runner online but not executing jobs\n"
-            weekly_report+="• **Active**: Runner online and executing jobs\n"
-            weekly_report+="• **Offline**: Runner not responding\n\n"
-            weekly_report+="_Statistics based on $(echo "$stats" | jq -r '[.runners[].history[]] | length') data points collected every 15 minutes._\n"
+            # Add legend and footer
+            cat >> "$weekly_report_file" << EOF
+            
+            **Legend:**
+            • **Idle**: Runner online but not executing jobs
+            • **Active**: Runner online and executing jobs
+            • **Offline**: Runner not responding
+            
+            _Statistics based on $(echo "$stats" | jq -r '[.runners[].history[]] | length') data points collected every 15 minutes._
+            EOF
           fi
           
-          echo "should_send_weekly=$is_weekly_report" >> $GITHUB_OUTPUT
           echo "weekly_message<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$weekly_report" >> $GITHUB_OUTPUT
+          cat "$weekly_report_file" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          
+          # Clean up temp file
+          rm -f "$weekly_report_file"
 
       - name: Send status message on Zulip
         if: steps.check-runners.outputs.should_notify == 'true'
@@ -296,7 +316,7 @@ jobs:
             ${{ steps.check-runners.outputs.message }}
 
       - name: Send weekly report on Zulip
-        if: steps.weekly-stats.outputs.should_send_weekly == 'true'
+        if: steps.check-runners.outputs.is_weekly_report == 'true'
         uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
         with:
           api-key: ${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}
@@ -333,8 +353,10 @@ jobs:
           
           echo ""
           echo "=== Statistics Summary ==="
-          cat "${{ env.STATS_FILE }}" | jq '.runners | keys | length' | xargs echo "Runners tracked:"
-          cat "${{ env.STATS_FILE }}" | jq '[.runners[].history[]] | length' | xargs echo "Total data points:"
+          runner_count=$(cat "${{ env.STATS_FILE }}" | jq '.runners | keys | length')
+          echo "Runners tracked: $runner_count"
+          data_points=$(cat "${{ env.STATS_FILE }}" | jq '[.runners[].history[]] | length')
+          echo "Total data points: $data_points"
           
           echo ""
           echo "=== 7-Day Statistics Report ==="
@@ -348,7 +370,7 @@ jobs:
             echo "✅ No status notifications needed - all runners stable"
           fi
           
-          if [ "${{ steps.weekly-stats.outputs.should_send_weekly }}" = "true" ]; then
+          if [ "${{ steps.check-runners.outputs.is_weekly_report }}" = "true" ]; then
             echo "📊 Weekly report sent to Zulip"
           else
             echo "📊 Weekly report generated but not sent (not scheduled weekly run)"
