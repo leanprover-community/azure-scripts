@@ -9,7 +9,7 @@ on:
       send_weekly_report:
         description: 'Send a weekly report to Zulip'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
 env:
@@ -17,8 +17,8 @@ env:
   ZULIP_CHANNEL: "CI admins"
   STATE_FILE: "runner-state.json"
   STATS_FILE: "runner-stats.json"
-  CACHE_KEY: "runner-monitor-state-v3"
-  STATS_CACHE_KEY: "runner-monitor-stats-v3"
+  CACHE_KEY: "runner-monitor-state-v4"
+  STATS_CACHE_KEY: "runner-monitor-stats-v4"
 
 jobs:
   monitor-runners:
@@ -360,7 +360,9 @@ jobs:
           
           echo ""
           echo "=== 7-Day Statistics Report ==="
-          echo -e "${{ steps.weekly-stats.outputs.weekly_message }}"
+          cat << 'EOF'
+          ${{ steps.weekly-stats.outputs.weekly_message }}
+          EOF
           
           if [ "${{ steps.check-runners.outputs.should_notify }}" = "true" ]; then
             echo ""
