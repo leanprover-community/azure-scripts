@@ -245,9 +245,9 @@ jobs:
           else
             # Write table header
             cat >> "$weekly_report_file" << 'EOF'
-            | Runner | Idle | Active | Offline | Labels |
-            |--------|------|---------|---------|--------|
-            EOF
+          | Runner | Idle | Active | Offline | Labels |
+          |--------|------|---------|---------|--------|
+          EOF
             
             # Process each runner and write to temp file
             echo "$runners" | while read -r runner; do
@@ -285,14 +285,14 @@ jobs:
             
             # Add legend and footer
             cat >> "$weekly_report_file" << EOF
-            
-            **Legend:**
-            • **Idle**: Runner online but not executing jobs
-            • **Active**: Runner online and executing jobs
-            • **Offline**: Runner not responding
-            
-            _Statistics based on $(echo "$stats" | jq -r '[.runners[].history[]] | length') data points collected every 15 minutes._
-            EOF
+          
+          **Legend:**
+          • **Idle**: Runner online but not executing jobs
+          • **Active**: Runner online and executing jobs
+          • **Offline**: Runner not responding
+          
+          _Statistics based on $(echo "$stats" | jq -r '[.runners[].history[]] | length') data points collected every 15 minutes._
+          EOF
           fi
           
           echo "weekly_message<<EOF" >> $GITHUB_OUTPUT
