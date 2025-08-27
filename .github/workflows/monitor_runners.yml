@@ -89,6 +89,7 @@ jobs:
           # Process current runners
           echo "$response" | jq -r '.runners[] | "\(.name)|\(.status)|\(.busy)|\(.labels | map(.name) | join(","))"' | while IFS='|' read -r name status busy labels; do
             if [ -z "$name" ]; then continue; fi
+            echo "Processing runner: $name"
             
             # Determine runner state (Idle, Active, Offline)
             if [ "$status" != "online" ]; then
@@ -98,6 +99,7 @@ jobs:
             else
               runner_state="Idle"
             fi
+            echo "runner_state: $runner_state"
             
             # Get previous state for this runner
             prev_status=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].status // "unknown"')
