@@ -17,8 +17,8 @@ env:
   ZULIP_CHANNEL: "CI admins"
   STATE_FILE: "runner-state.json"
   STATS_FILE: "runner-stats.json"
-  CACHE_KEY: "runner-monitor-state"
-  STATS_CACHE_KEY: "runner-monitor-stats"
+  CACHE_KEY: "runner-monitor-state-v2"
+  STATS_CACHE_KEY: "runner-monitor-stats-v2"
 
 jobs:
   monitor-runners:
@@ -39,13 +39,13 @@ jobs:
           key: ${{ env.STATS_CACHE_KEY }}
 
       - name: Create empty state
-        if: steps.cache-restore.cache-hit != 'true'
+        if: steps.cache-restore.outputs.cache-hit != 'true'
         run: |
           echo "No previous state file found, creating empty state"
           echo '{"last_run": "", "runners": {}}' > "${{ env.STATE_FILE }}"
 
       - name: Create empty stats
-        if: steps.stats-cache-restore.cache-hit != 'true'
+        if: steps.stats-cache-restore.outputs.cache-hit != 'true'
         run: |
           echo "No previous stats file found, creating empty stats"
           echo '{"runners": {}, "last_cleanup": ""}' > "${{ env.STATS_FILE }}"
@@ -313,6 +313,9 @@ jobs:
           echo "=== Runner Monitor Summary ==="
           echo "State file contents:"
           cat "${{ env.STATE_FILE }}" | jq .
+
+          echo "Stats file contents:"
+          cat "${{ env.STATS_FILE }}" | jq .
           
           echo ""
           echo "=== Statistics Summary ==="
