@@ -85,6 +85,7 @@ jobs:
               from_entries
             )
           ')
+          echo "new_stats after 7-day cleanup: $new_stats"
           
           # Process current runners
           echo "$response" | jq -r '.runners[] | "\(.name)|\(.status)|\(.busy)|\(.labels | map(.name) | join(","))"' | while IFS='|' read -r name status busy labels; do
@@ -104,13 +105,6 @@ jobs:
             # Get previous state for this runner
             prev_status=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].status // "unknown"')
             prev_consecutive=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].consecutive_offline // 0')
-            
-            # Update stats with current state
-            new_stats=$(echo "$new_stats" | jq --arg name "$name" --arg state "$runner_state" --arg time "$current_time" --arg labels "$labels" '
-              .runners[$name] = (.runners[$name] // {"history": [], "labels": ""}) |
-              .runners[$name].labels = $labels |
-              .runners[$name].history += [{"timestamp": $time, "state": $state}]
-            ')
             
             if [ "$status" != "online" ]; then
               # Runner is offline
@@ -136,13 +130,26 @@ jobs:
             
             # Update state for this runner
             echo "$name,$status,$consecutive_offline,$labels" >> current_runners.tmp
+            
+            # Update stats with current state
+            echo "$name,$runner_state,$labels" >> current_runner_states.tmp
           done
+          
+          # Update stats file with all current runner states
+          while IFS=',' read -r name state labels; do
+            if [ -n "$name" ]; then
+              new_stats=$(echo "$new_stats" | jq --arg name "$name" --arg state "$state" --arg time "$current_time" --arg labels "$labels" '
+                .runners[$name] = (.runners[$name] // {"history": [], "labels": ""}) |
+                .runners[$name].labels = $labels |
+                .runners[$name].history += [{"timestamp": $time, "state": $state}]
+              ')
+            fi
+          done < current_runner_states.tmp
+
+          echo "new_stats after processing: $new_stats"
           
           # Save updated stats
           echo "$new_stats" > "${{ env.STATS_FILE }}"
-          
-          # Build new state file
-          new_state=$(echo "$previous_state" | jq --arg time "$current_time" '.last_run = $time | .runners = {}')
           
           if [ -f "current_runners.tmp" ]; then
             while IFS=',' read -r name status consecutive labels; do
@@ -152,9 +159,6 @@ jobs:
               fi
             done < current_runners.tmp
           fi
-          
-          # Save new state
-          echo "$new_state" > "${{ env.STATE_FILE }}"
           
           # Prepare notification messages
           notification_message=""
@@ -203,7 +207,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
           
           # Clean up temp files
-          rm -f newly_offline.tmp persistent_offline.tmp back_online.tmp current_runners.tmp
+          rm -f newly_offline.tmp persistent_offline.tmp back_online.tmp current_runners.tmp current_runner_states.tmp
 
       - name: Generate stats report
         id: weekly-stats
