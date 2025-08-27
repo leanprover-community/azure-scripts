@@ -67,6 +67,14 @@ jobs:
           # Load previous state and stats
           previous_state=$(cat "${{ env.STATE_FILE }}")
           previous_stats=$(cat "${{ env.STATS_FILE }}")
+
+          echo "::group::previous_state"
+          echo "$previous_state"
+          echo "::endgroup::"
+
+          echo "::group::previous_stats"
+          echo "$previous_stats"
+          echo "::endgroup::"
           
           # Initialize arrays for notifications
           newly_offline_runners=()
@@ -87,7 +95,9 @@ jobs:
               from_entries
             )
           ')
-          echo "new_stats after 7-day cleanup: $new_stats"
+          echo "::group::new_stats after 7-day cleanup"
+          echo "$new_stats"
+          echo "::endgroup::"
           
           # Process current runners
           echo "$response" | jq -r '.runners[] | "\(.name)|\(.status)|\(.busy)|\(.labels | map(.name) | join(","))"' | while IFS='|' read -r name status busy labels; do
@@ -107,34 +117,39 @@ jobs:
             # Get previous state for this runner
             prev_status=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].status // "unknown"')
             prev_consecutive=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].consecutive_offline // 0')
+
+            echo "prev_status: $prev_status"
+            echo "prev_consecutive: $prev_consecutive"
             
             if [ "$status" != "online" ]; then
               # Runner is offline
               if [ "$prev_status" = "online" ] || [ "$prev_status" = "unknown" ]; then
                 # First time offline
                 consecutive_offline=1
-                echo "NEWLY_OFFLINE: $name (labels: $labels)" >> newly_offline.tmp
+                echo "NEWLY_OFFLINE: $name (labels: $labels)" | tee -a newly_offline.tmp
               else
                 # Still offline, increment counter
                 consecutive_offline=$((prev_consecutive + 1))
                 if [ "$consecutive_offline" -ge 2 ]; then
-                  echo "PERSISTENT_OFFLINE: $name,$consecutive_offline,$labels" >> persistent_offline.tmp
+                  echo "PERSISTENT_OFFLINE: $name,$consecutive_offline,$labels" | tee -a persistent_offline.tmp
                 fi
               fi
             else
               # Runner is online
               consecutive_offline=0
-              if [ "$prev_status" = "offline" ]; then
+              if [ "$prev_status" = "offline" ] && [ "$prev_consecutive" -ge 2 ]; then
                 # Runner came back online
-                echo "BACK_ONLINE: $name (labels: $labels)" >> back_online.tmp
+                echo "BACK_ONLINE: $name,$prev_consecutive,$labels" | tee -a back_online.tmp
               fi
             fi
             
             # Update state for this runner
-            echo "$name,$status,$consecutive_offline,$labels" >> current_runners.tmp
+            echo "updated state:"
+            echo "$name,$status,$consecutive_offline,$labels" | tee -a current_runners.tmp
             
             # Update stats with current state
-            echo "$name,$runner_state,$labels" >> current_runner_states.tmp
+            echo "updated stats:"
+            echo "$name,$runner_state,$labels" | tee -a current_runner_states.tmp
             echo "::endgroup::"
           done
           
@@ -149,7 +164,9 @@ jobs:
             fi
           done < current_runner_states.tmp
 
-          echo "new_stats after processing: $new_stats"
+          echo "::group::new_stats after processing"
+          echo "$new_stats"
+          echo "::endgroup::"
           
           # Save updated stats
           echo "$new_stats" > "${{ env.STATS_FILE }}"
@@ -164,6 +181,10 @@ jobs:
                   '.runners[$name] = {"status": $status, "consecutive_offline": $consecutive, "labels": $labels}')
               fi
             done < current_runners.tmp
+
+            echo "::group::Formatted current runners info"
+            cat current_runners.tmp
+            echo "::endgroup::"
           fi
 
           # Save new state
@@ -175,9 +196,13 @@ jobs:
           # Check for runners that came back online
           if [ -f "back_online.tmp" ] && [ -s "back_online.tmp" ]; then
             notification_message+="✅ **[Runners](https://github.com/organizations/${{ github.repository_owner }}/settings/actions/runners) back online:**\n\n"
-            while IFS= read -r line; do
-              runner_info=$(echo "$line" | sed 's/BACK_ONLINE: //')
-              notification_message+="- \`$runner_info\`\n"
+            while IFS=',' read -r name prev_consecutive labels; do
+              name=$(echo "$name" | sed 's/BACK_ONLINE: //')
+              if [ -n "$labels" ] && [ "$labels" != "" ]; then
+                notification_message+="- \`$name\` (was offline for ${prev_consecutive} checks, labels: \`$labels\`)\n"
+              else
+                notification_message+="- \`$name\` (was offline for ${prev_consecutive} checks, no labels)\n"
+              fi
             done < back_online.tmp
             notification_message+="\n"
           fi
@@ -186,6 +211,7 @@ jobs:
           if [ -f "persistent_offline.tmp" ] && [ -s "persistent_offline.tmp" ]; then
             notification_message+="⚠️ **[Runners](https://github.com/organizations/${{ github.repository_owner }}/settings/actions/runners) offline for multiple checks:**\n\n"
             while IFS=',' read -r name consecutive labels; do
+              name=$(echo "$name" | sed 's/PERSISTENT_OFFLINE: //')
               if [ -n "$labels" ] && [ "$labels" != "" ]; then
                 notification_message+="- \`$name\` (${consecutive} consecutive checks, labels: \`$labels\`)\n"
               else
@@ -233,16 +259,16 @@ jobs:
           weekly_report_file="weekly_report.tmp"
           
           # Write report header
-          cat > "$weekly_report_file" << 'EOF'
+          tee > "$weekly_report_file" << 'EOF'
           📊 **Weekly Runner Statistics Report**
           
           EOF
           
-          echo "_Period: Last 7 days • Generated: $(date -u +'%Y-%m-%d %H:%M UTC')_" >> "$weekly_report_file"
-          echo "" >> "$weekly_report_file"
+          echo "_Period: Last 7 days • Generated: $(date -u +'%Y-%m-%d %H:%M UTC')_" | tee -a "$weekly_report_file"
+          echo "" | tee -a "$weekly_report_file"
           
           if [ -z "$runners" ]; then
-            echo "No runner data available for the past 7 days." >> "$weekly_report_file"
+            echo "No runner data available for the past 7 days." | tee -a "$weekly_report_file"
           else
             # Write table header
             cat >> "$weekly_report_file" << 'EOF'
@@ -281,11 +307,11 @@ jobs:
                 labels_display="\`$labels\`"
               fi
               
-              echo "| \`$runner\` | ${idle_pct}% | ${active_pct}% | ${offline_pct}% | $labels_display |" >> "$weekly_report_file"
+              echo "| \`$runner\` | ${idle_pct}% | ${active_pct}% | ${offline_pct}% | $labels_display |" | tee -a "$weekly_report_file"
             done
             
             # Add legend and footer
-            cat >> "$weekly_report_file" << EOF
+            tee >> "$weekly_report_file" << EOF
           
           **Legend:**
           • **Idle**: Runner online but not executing jobs
