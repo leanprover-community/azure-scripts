@@ -223,7 +223,7 @@ jobs:
           
           # Check if this is a weekly report trigger
           is_weekly_report="false"
-          if [ "${{ github.event.schedule }}" = "0 9 * * 1" ] || [ "${{ inputs.send_weekly_report }}" = "true" ]; then
+          if [ "${{ github.event.schedule }}" = "0 9 * * 1" ] || [ "${{ toJSON(inputs.send_weekly_report) }}" = "true" ]; then
             is_weekly_report="true"
           fi
           
