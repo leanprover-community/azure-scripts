@@ -291,9 +291,9 @@ jobs:
                   ($data.history | map(select(.state == "Idle")) | length) as $idle |
                   ($data.history | map(select(.state == "Active")) | length) as $active |
                   ($data.history | map(select(.state == "Offline")) | length) as $offline |
-                  (($idle * 100.0 / $total) | floor * 100 / 100) as $idle_pct |
-                  (($active * 100.0 / $total) | floor * 100 / 100) as $active_pct |
-                  (($offline * 100.0 / $total) | floor * 100 / 100) as $offline_pct |
+                  (($idle * 100.0 / $total) | .*100 | round / 100) as $idle_pct |
+                  (($active * 100.0 / $total) | .*100 | round / 100) as $active_pct |
+                  (($offline * 100.0 / $total) | .*100 | round / 100) as $offline_pct |
                   "\($idle_pct)|\($active_pct)|\($offline_pct)|\($data.labels // "")"
                 end
               ')
@@ -309,6 +309,51 @@ jobs:
               
               echo "| \`$runner\` | ${idle_pct}% | ${active_pct}% | ${offline_pct}% | $labels_display |" | tee -a "$weekly_report_file"
             done
+            
+            # Calculate concurrent state statistics
+            echo "Calculating concurrent state statistics..."
+            concurrent_stats=$(echo "$stats" | jq -r '
+              . as $root |
+              # Get all unique timestamps across all runners
+              [.runners[].history[].timestamp] | unique | sort as $timestamps |
+              
+              # For each timestamp, check the state of each runner.
+              # If a runner does not have a state recorded at a specific timestamp,
+              # we use the most recent state before that timestamp,
+              # or default to "Offline" if no prior state exists.
+              $timestamps | map(. as $ts |
+                [$root.runners[] | .history | map(select(.timestamp <= $ts)) | last | .state // "Offline"] |
+                {
+                  timestamp: $ts,
+                  all_idle: (all(. == "Idle")),
+                  all_busy: (all(. == "Active")),
+                  states: .
+                }
+              ) |
+              
+              # Calculate percentages
+              length as $total |
+              if $total == 0 then
+                "0.0|0.0"
+              else
+                (map(select(.all_idle)) | length) as $all_idle_count |
+                (map(select(.all_busy)) | length) as $all_busy_count |
+                (($all_idle_count * 100.0 / $total) | .*100 | round / 100) as $all_idle_pct |
+                (($all_busy_count * 100.0 / $total) | .*100 | round / 100) as $all_busy_pct |
+                "\($all_idle_pct)|\($all_busy_pct)"
+              end
+            ')
+            
+            IFS='|' read -r all_idle_pct all_busy_pct <<< "$concurrent_stats"
+            
+            # Add concurrent statistics to report
+            cat >> "$weekly_report_file" << EOF
+          
+          **Overall Statistics:**
+          - **All runners idle**: ${all_idle_pct}% of monitoring periods
+          - **All runners busy**: ${all_busy_pct}% of monitoring periods
+          
+          EOF
             
             # Add legend and footer
             tee >> "$weekly_report_file" << EOF
