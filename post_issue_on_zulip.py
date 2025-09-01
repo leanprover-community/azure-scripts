@@ -10,6 +10,7 @@ import time
 
 zulip_token = sys.argv[1]
 gh_token = sys.argv[2]
+should_send_to_zulip = sys.argv[3]
 
 zulip_client = zulip.Client(email="random-issue-bot@zulipchat.com", api_key=zulip_token, site="https://leanprover.zulipchat.com")
 
@@ -86,7 +87,8 @@ Is this {kind} still relevant? Any recent updates? Anyone making progress?
 
     print(content)
 
-    zulip_client.send_message(post)
+    if should_send_to_zulip != "false":
+        zulip_client.send_message(post)
 
 post_random(open_issues, 'issue')
 post_random(open_prs, 'PR')
