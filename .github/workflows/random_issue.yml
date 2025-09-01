@@ -31,7 +31,7 @@ jobs:
         pip install PyGithub zulip
 
     - name: Post issue on Zulip
-      run: python post_issue_on_zulip.py "${{ secrets.RANDOM_ISSUE_BOT_ZULIP_TOKEN }}" "${{ secrets.LCB_TOKEN }}" "${{ toJSON(inputs.send_zulip_message) }}"
+      run: python post_issue_on_zulip.py "${{ secrets.RANDOM_ISSUE_BOT_ZULIP_TOKEN }}" "${{ secrets.LCB_TOKEN }}" "${{ toJSON(github.event_name == 'schedule' || inputs.send_zulip_message) }}"
 
   workflow-keepalive:
     if: github.event_name == 'schedule'
