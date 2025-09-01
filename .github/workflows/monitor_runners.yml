@@ -318,7 +318,7 @@ jobs:
               [.runners[].history[].timestamp] | unique | sort as $timestamps |
               
               # For each timestamp, check the state of each runner.
-              # If a runner doesn't have a state recorded at a specific timestamp,
+              # If a runner does not have a state recorded at a specific timestamp,
               # we use the most recent state before that timestamp,
               # or default to "Offline" if no prior state exists.
               $timestamps | map(. as $ts |
