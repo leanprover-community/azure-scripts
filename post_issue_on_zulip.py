@@ -30,25 +30,35 @@ print(posted_topics)
 gh = github.Github(login_or_token=gh_token)
 mathlib = gh.get_repo('leanprover-community/mathlib4')
 
-open_items = mathlib.get_issues(state='open')
-open_prs = []
+now = datetime.datetime.now(tz=datetime.timezone.utc)
+delta = datetime.timedelta(days=7)
+min_age = now - delta
+
+open_issues_raw = mathlib.get_issues(state='open')
 open_issues = []
+open_prs_raw = mathlib.get_pulls(state='open')
+open_prs = []
 
-print(f'Found {open_items.totalCount} open item(s) (PRs and issues).')
+print(f'Found {open_prs_raw.totalCount} open PR(s) and {open_issues_raw.totalCount} open issue(s).')
 
-for i in open_items:
-    now = datetime.datetime.now(tz=datetime.timezone.utc)
-    delta = datetime.timedelta(days=7)
-    min_age = now - delta
-    if i.updated_at < min_age \
-         and 'blocked-by-other-PR' not in [l.name for l in i.labels] \
-             and not (i.number in posted_topics and datetime.datetime.fromtimestamp(posted_topics[i.number], tz=datetime.timezone.utc) > min_age):
-        if i.pull_request:
-            open_prs.append(i)
-        else:
-            open_issues.append(i)
+# Process issues (need to filter out PRs since get_issues returns both)
+for issue in open_issues_raw:
+    if not issue.pull_request:  # Only process actual issues
+        if issue.updated_at < min_age \
+             and 'blocked-by-other-PR' not in [l.name for l in issue.labels] \
+                 and not (issue.number in posted_topics and datetime.datetime.fromtimestamp(posted_topics[issue.number], tz=datetime.timezone.utc) > min_age):
+            open_issues.append(issue)
 
 print(f'Found {len(open_issues)} open issue(s) after filtering.')
+
+# Process PRs
+for pr in open_prs_raw:
+    if pr.updated_at < min_age \
+         and 'blocked-by-other-PR' not in [l.name for l in pr.labels] \
+             and not (pr.number in posted_topics and datetime.datetime.fromtimestamp(posted_topics[pr.number], tz=datetime.timezone.utc) > min_age) \
+             and not pr.draft:
+        open_prs.append(pr)
+                 
 print(f'Found {len(open_prs)} open PR(s) after filtering.')
 
 def post_random(select_from, kind):
