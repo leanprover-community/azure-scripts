@@ -1,6 +1,7 @@
 name: Monitor Self-Hosted Runners
 
 on:
+  push:
   schedule:
     - cron: '*/15 * * * *' # every 15 minutes
     - cron: '0 9 * * 1' # weekly report every Monday at 9 AM UTC
