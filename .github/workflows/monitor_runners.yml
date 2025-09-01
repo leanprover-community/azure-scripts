@@ -414,6 +414,15 @@ jobs:
           path: ${{ env.STATS_FILE }}
           key: ${{ env.STATS_CACHE_KEY }}-${{ github.run_id }}
 
+      - name: upload files as artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: monitor_runners_artifact
+          path: |
+            ${{ env.STATE_FILE }}
+            ${{ env.STATS_FILE }}
+
       - name: Log summary
         run: |
           echo "=== Runner Monitor Summary ==="
