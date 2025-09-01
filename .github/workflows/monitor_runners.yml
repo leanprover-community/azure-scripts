@@ -1,6 +1,7 @@
 name: Monitor Self-Hosted Runners
 
 on:
+  # push: # uncomment for testing if on a branch in the azure_scripts repo
   schedule:
     - cron: '*/15 * * * *' # every 15 minutes
     - cron: '0 9 * * 1' # weekly report every Monday at 9 AM UTC
@@ -17,8 +18,8 @@ env:
   ZULIP_CHANNEL: "CI admins"
   STATE_FILE: "runner-state.json"
   STATS_FILE: "runner-stats.json"
-  CACHE_KEY: "runner-monitor-state-v4"
-  STATS_CACHE_KEY: "runner-monitor-stats-v4"
+  CACHE_KEY: ${{ github.ref == 'refs/heads/master' && 'runner-monitor-state-v4' || 'runner-monitor-state-testing' }}
+  STATS_CACHE_KEY: ${{ github.ref == 'refs/heads/master' && 'runner-monitor-stats-v4' || 'runner-monitor-stats-testing' }}
 
 jobs:
   monitor-runners:
@@ -401,14 +402,14 @@ jobs:
             ${{ steps.weekly-stats.outputs.weekly_message }}
 
       - name: Save state to cache
-        if: always()
+        if: always() && github.event_name != 'workflow_dispatch'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ${{ env.STATE_FILE }}
           key: ${{ env.CACHE_KEY }}-${{ github.run_id }}
 
       - name: Save stats to cache
-        if: always()
+        if: always() && github.event_name != 'workflow_dispatch'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ${{ env.STATS_FILE }}
