@@ -18,8 +18,8 @@ env:
   ZULIP_CHANNEL: "CI admins"
   STATE_FILE: "runner-state.json"
   STATS_FILE: "runner-stats.json"
-  CACHE_KEY: "runner-monitor-state-v4"
-  STATS_CACHE_KEY: "runner-monitor-stats-v4"
+  CACHE_KEY: "runner-monitor-state-testing"
+  STATS_CACHE_KEY: "runner-monitor-stats-testing"
 
 jobs:
   monitor-runners:
