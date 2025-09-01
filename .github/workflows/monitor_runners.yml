@@ -1,7 +1,6 @@
 name: Monitor Self-Hosted Runners
 
 on:
-  push:
   schedule:
     - cron: '*/15 * * * *' # every 15 minutes
     - cron: '0 9 * * 1' # weekly report every Monday at 9 AM UTC
@@ -18,8 +17,8 @@ env:
   ZULIP_CHANNEL: "CI admins"
   STATE_FILE: "runner-state.json"
   STATS_FILE: "runner-stats.json"
-  CACHE_KEY: "runner-monitor-state-testing"
-  STATS_CACHE_KEY: "runner-monitor-stats-testing"
+  CACHE_KEY: "runner-monitor-state-v4"
+  STATS_CACHE_KEY: "runner-monitor-stats-v4"
 
 jobs:
   monitor-runners:
