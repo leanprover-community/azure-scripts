@@ -264,7 +264,7 @@ jobs:
           
           EOF
           
-          echo "_Period: Last 7 days • Generated: $(date -u +'%Y-%m-%d %H:%M UTC')_" | tee -a "$weekly_report_file"
+          echo "*Period: Last 7 days • Generated: $(date -u +'%Y-%m-%d %H:%M UTC')*" | tee -a "$weekly_report_file"
           echo "" | tee -a "$weekly_report_file"
           
           if [ -z "$runners" ]; then
@@ -318,7 +318,7 @@ jobs:
           • **Active**: Runner online and executing jobs
           • **Offline**: Runner not responding
           
-          _Statistics based on $(echo "$stats" | jq -r '[.runners[].history[]] | length') data points collected every 15 minutes._
+          *Statistics based on $(echo "$stats" | jq -r '[.runners[].history[]] | length') data points collected every 15 minutes.*
           EOF
           fi
           
