@@ -314,6 +314,7 @@ jobs:
             # Calculate concurrent state statistics
             echo "Calculating concurrent state statistics..."
             concurrent_stats=$(echo "$stats" | jq -r '
+              . as $root |
               # Get all unique timestamps across all runners
               [.runners[].history[].timestamp] | unique | sort as $timestamps |
               
@@ -322,7 +323,7 @@ jobs:
               # we use the most recent state before that timestamp,
               # or default to "Offline" if no prior state exists.
               $timestamps | map(. as $ts |
-                [.runners[] | .history | map(select(.timestamp <= $ts)) | last | .state // "Offline"] |
+                [$root.runners[] | .history | map(select(.timestamp <= $ts)) | last | .state // "Offline"] |
                 {
                   timestamp: $ts,
                   all_idle: (all(. == "Idle")),
