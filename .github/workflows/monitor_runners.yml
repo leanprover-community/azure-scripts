@@ -569,7 +569,7 @@ jobs:
             ${{ steps.check-runners.outputs.message }}
 
       - name: Send label management notification on Zulip
-        if: steps.manage-labels.outputs.has_label_notification == 'true'
+        if: steps.manage-labels.outputs.has_label_errors == 'true'
         uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
         with:
           api-key: ${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}
@@ -577,9 +577,9 @@ jobs:
           organization-url: ${{ env.ZULIP_SERVER }}
           to: ${{ env.ZULIP_CHANNEL }}
           type: 'stream'
-          topic: 'Runner Labels'
+          topic: 'Runner Status'
           content: |
-            ${{ steps.manage-labels.outputs.label_message }}
+            ${{ steps.manage-labels.outputs.label_errors }}
 
       - name: Send weekly report on Zulip
         if: steps.check-runners.outputs.is_weekly_report == 'true'
@@ -638,10 +638,11 @@ jobs:
           echo ""
           echo "=== Label Management Summary ==="
           echo "Bors active: ${{ steps.bors_active.outputs.result }}"
-          if [ "${{ steps.manage-labels.outputs.has_label_notification }}" = "true" ]; then
-            echo "Label changes made (see Zulip notification)"
-          else
-            echo "No label changes needed"
+          if [ -n "${{ steps.manage-labels.outputs.label_summary }}" ]; then
+            echo -e "${{ steps.manage-labels.outputs.label_summary }}"
+          fi
+          if [ "${{ steps.manage-labels.outputs.has_label_errors }}" = "true" ]; then
+            echo "⚠️ Label management errors occurred (see Zulip notification)"
           fi
 
           echo ""
