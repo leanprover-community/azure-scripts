@@ -638,9 +638,9 @@ jobs:
           echo ""
           echo "=== Label Management Summary ==="
           echo "Bors active: ${{ steps.bors_active.outputs.result }}"
-          if [ -n "${{ steps.manage-labels.outputs.label_summary }}" ]; then
-            echo -e "${{ steps.manage-labels.outputs.label_summary }}"
-          fi
+          cat << 'EOF'
+          ${{ steps.manage-labels.outputs.label_summary }}
+          EOF
           if [ "${{ steps.manage-labels.outputs.has_label_errors }}" = "true" ]; then
             echo "⚠️ Label management errors occurred (see Zulip notification)"
           fi
