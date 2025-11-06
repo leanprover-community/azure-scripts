@@ -268,75 +268,79 @@ jobs:
           label_summary=""
           label_errors=""
 
-          # Helper function to get custom labels for a runner
-          get_custom_labels() {
-            local runner_id=$1
-            echo "$response" | jq -c --arg id "$runner_id" '
-              .runners[] |
-              select(.id == ($id | tonumber)) |
-              .labels |
-              map(select(.type == "custom") | .name) |
-              sort
-            '
-          }
-
-          # Helper function to update runner labels
-          update_runner_labels() {
+          # Helper function to add a label to a runner
+          add_label() {
             local runner_id=$1
             local runner_name=$2
-            local new_labels=$3
-            local current_labels_display=$4
+            local label=$3
 
-            local update_response=$(curl -s -X PUT \
+            local update_response=$(curl -s -X POST \
               -H "Authorization: token ${{ secrets.MONITOR_RUNNERS_GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners/$runner_id/labels" \
-              -d "{\"labels\":$new_labels}")
+              -d "{\"labels\":[\"$label\"]}")
 
             if echo "$update_response" | jq -e '.labels' > /dev/null 2>&1; then
-              local new_labels_display=$(echo "$new_labels" | jq -r 'join(", ")')
-              label_summary+="🏷️ Runner \`$runner_name\` labels set to: \`$new_labels_display\` (was: \`$current_labels_display\`)\n"
+              label_summary+="🏷️ Added \`$label\` label to runner \`$runner_name\`\n"
               return 0
             else
-              echo "ERROR: Failed to update labels for runner $runner_name"
+              echo "ERROR: Failed to add label $label to runner $runner_name"
               echo "Response: $update_response"
-              label_errors+="❌ Failed to update runner \`$runner_name\` labels\n"
+              label_errors+="❌ Failed to add \`$label\` label to runner \`$runner_name\`\n"
               return 1
             fi
           }
 
-          # Ensure all runners have 'bors' label
-          echo "Ensuring all runners have 'bors' label..."
-          runner_ids=$(echo "$response" | jq -r '.runners[].id')
+          # Helper function to remove a label from a runner
+          remove_label() {
+            local runner_id=$1
+            local runner_name=$2
+            local label=$3
 
-          if [ -z "$runner_ids" ]; then
+            local update_response=$(curl -s -X DELETE \
+              -H "Authorization: token ${{ secrets.MONITOR_RUNNERS_GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners/$runner_id/labels/$label")
+
+            # DELETE returns 204 No Content on success, or 404/422 on error
+            if [ $? -eq 0 ]; then
+              label_summary+="🏷️ Removed \`$label\` label from runner \`$runner_name\`\n"
+              return 0
+            else
+              echo "ERROR: Failed to remove label $label from runner $runner_name"
+              echo "Response: $update_response"
+              label_errors+="❌ Failed to remove \`$label\` label from runner \`$runner_name\`\n"
+              return 1
+            fi
+          }
+
+          # Extract runner data (id, name, custom labels)
+          echo "Extracting runner data..."
+          runner_data=$(echo "$response" | jq -r '.runners[] | "\(.id)|\(.name)|\([.labels[] | select(.type == "custom") | .name] | join(","))"')
+
+          if [ -z "$runner_data" ]; then
             echo "ERROR: No runners found"
             label_errors+="❌ **Label Management Error:** No runners found in organization\n\n"
           else
-            for runner_id in $runner_ids; do
-              runner_name=$(echo "$response" | jq -r --arg id "$runner_id" '.runners[] | select(.id == ($id | tonumber)) | .name')
-              current_labels=$(get_custom_labels "$runner_id")
-
+            # Ensure all runners have 'bors' label
+            echo "Checking if all runners have 'bors' label..."
+            while IFS='|' read -r runner_id runner_name labels; do
               # Check if 'bors' is present
-              has_bors=$(echo "$current_labels" | jq 'contains(["bors"])')
-
-              if [ "$has_bors" != "true" ]; then
-                echo "Runner $runner_name is missing 'bors' label, adding it"
-                new_labels=$(echo "$current_labels" | jq '. + ["bors"] | sort')
-                current_display=$(echo "$current_labels" | jq -r 'join(", ")')
-                update_runner_labels "$runner_id" "$runner_name" "$new_labels" "$current_display"
+              if [[ ",$labels," != *",bors,"* ]]; then
+                echo "Adding 'bors' label to runner: $runner_name"
+                add_label "$runner_id" "$runner_name" "bors"
               fi
-            done
+            done <<< "$runner_data"
 
             # Now manage 'pr' label based on bors status
             if [ "$bors_active" = "true" ]; then
-              echo "Bors is active - ensuring exactly one runner does NOT have 'pr' label"
+              echo "Managing 'pr' labels (bors active - one runner should NOT have 'pr')..."
 
               # Check if there's already a runner without 'pr'
               runner_without_pr=$(echo "$response" | jq -r '
                 .runners[] |
                 select(
-                  (.labels | map(select(.type == "custom") | .name) | contains(["pr"]) | not)
+                  ([.labels[] | select(.type == "custom") | .name] | contains(["pr"]) | not)
                 ) |
                 .name
               ' | head -n 1)
@@ -360,33 +364,23 @@ jobs:
                   label_errors+="❌ **Label Management Error:** No online runners available to remove \`pr\` label from\n\n"
                 else
                   IFS='|' read -r runner_id runner_name <<< "$selected_runner"
-                  current_labels=$(get_custom_labels "$runner_id")
-                  new_labels=$(echo "$current_labels" | jq 'map(select(. != "pr"))')
-                  current_display=$(echo "$current_labels" | jq -r 'join(", ")')
-
-                  echo "Removing 'pr' label from runner $runner_name"
-                  update_runner_labels "$runner_id" "$runner_name" "$new_labels" "$current_display"
+                  echo "Removing 'pr' label from runner: $runner_name"
+                  remove_label "$runner_id" "$runner_name" "pr"
                 fi
               fi
 
             else
-              echo "Bors is not active - ensuring all runners have 'pr' label"
+              echo "Managing 'pr' labels (bors inactive - all runners should have 'pr')..."
 
               all_have_pr=true
-              for runner_id in $runner_ids; do
-                runner_name=$(echo "$response" | jq -r --arg id "$runner_id" '.runners[] | select(.id == ($id | tonumber)) | .name')
-                current_labels=$(get_custom_labels "$runner_id")
-
-                has_pr=$(echo "$current_labels" | jq 'contains(["pr"])')
-
-                if [ "$has_pr" != "true" ]; then
+              while IFS='|' read -r runner_id runner_name labels; do
+                # Check if 'pr' is present
+                if [[ ",$labels," != *",pr,"* ]]; then
                   all_have_pr=false
-                  echo "Runner $runner_name is missing 'pr' label, adding it"
-                  new_labels=$(echo "$current_labels" | jq '. + ["pr"] | sort')
-                  current_display=$(echo "$current_labels" | jq -r 'join(", ")')
-                  update_runner_labels "$runner_id" "$runner_name" "$new_labels" "$current_display"
+                  echo "Adding 'pr' label to runner: $runner_name"
+                  add_label "$runner_id" "$runner_name" "pr"
                 fi
-              done
+              done <<< "$runner_data"
 
               if [ "$all_have_pr" = true ]; then
                 echo "All runners already have 'pr' label"
