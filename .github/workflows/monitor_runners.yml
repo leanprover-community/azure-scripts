@@ -314,9 +314,15 @@ jobs:
             fi
           }
 
-          # Extract runner data (id, name, custom labels)
+          cleanup_label="cleanup-soon"
+
+          # Extract runner data (id, name, custom labels), skipping cleanup-soon runners
           echo "Extracting runner data..."
-          runner_data=$(echo "$response" | jq -r '.runners[] | "\(.id)|\(.name)|\([.labels[] | select(.type == "custom") | .name] | join(","))"')
+          runner_data=$(echo "$response" | jq -r --arg cleanup_label "$cleanup_label" '
+            .runners[]
+            | select([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
+            | "\(.id)|\(.name)|\([.labels[] | select(.type == "custom") | .name] | join(","))"
+          ')
 
           if [ -z "$runner_data" ]; then
             echo "ERROR: No runners found"
@@ -337,12 +343,14 @@ jobs:
               echo "Managing 'pr' labels (bors active - one runner should NOT have 'pr')..."
 
               # Check if there's already a runner without 'pr'
-              runner_without_pr=$(echo "$response" | jq -r '
-                .runners[] |
-                select(
+              runner_without_pr=$(echo "$response" | jq -r --arg cleanup_label "$cleanup_label" '
+                .runners[]
+                | select(
+                  ([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
+                  and
                   ([.labels[] | select(.type == "custom") | .name] | contains(["pr"]) | not)
-                ) |
-                .name
+                )
+                | .name
               ' | head -n 1)
 
               if [ -n "$runner_without_pr" ]; then
@@ -352,11 +360,21 @@ jobs:
                 echo "All runners have 'pr' - selecting one to remove it from"
 
                 # Find an idle runner first, fall back to any online runner
-                selected_runner=$(echo "$response" | jq -r '.runners[] | select(.status == "online" and .busy == false) | "\(.id)|\(.name)"' | head -n 1)
+                selected_runner=$(echo "$response" | jq -r --arg cleanup_label "$cleanup_label" '
+                  .runners[]
+                  | select(.status == "online" and .busy == false)
+                  | select([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
+                  | "\(.id)|\(.name)"
+                ' | head -n 1)
 
                 if [ -z "$selected_runner" ]; then
                   echo "No idle runner found, selecting any online runner"
-                  selected_runner=$(echo "$response" | jq -r '.runners[] | select(.status == "online") | "\(.id)|\(.name)"' | head -n 1)
+                  selected_runner=$(echo "$response" | jq -r --arg cleanup_label "$cleanup_label" '
+                    .runners[]
+                    | select(.status == "online")
+                    | select([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
+                    | "\(.id)|\(.name)"
+                  ' | head -n 1)
                 fi
 
                 if [ -z "$selected_runner" ]; then
