@@ -638,6 +638,8 @@ jobs:
         if: steps.check-runners.outputs.should_notify == 'true'
         id: zulip-status
         run: |
+          # Ensure that the bot is subscribed to the env.ZULIP_CHANNEL
+          # Otherwise it will not have permission to edit its own messages!
           zulip_url="${{ env.ZULIP_SERVER }}"
           zulip_email="${{ secrets.ZULIP_MONITOR_RUNNERS_BOT_EMAIL }}"
           zulip_key="${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}"
