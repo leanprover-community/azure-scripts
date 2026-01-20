@@ -65,6 +65,28 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners")
 
+          # Check if this is a weekly report trigger
+          is_weekly_report="false"
+          if [ "${{ github.event.schedule }}" = "0 9 * * 1" ] || [ "${{ toJSON(inputs.send_weekly_report) }}" = "true" ]; then
+            is_weekly_report="true"
+          fi
+          echo "is_weekly_report=$is_weekly_report" >> $GITHUB_OUTPUT
+
+          # Retry once if the API response is invalid (avoid false notifications)
+          if ! echo "$response" | jq -e '.runners and (.runners | type == "array")' > /dev/null; then
+            echo "Runner API response invalid; retrying once"
+            sleep 5
+            response=$(curl -s -H "Authorization: token ${{ secrets.MONITOR_RUNNERS_GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners")
+            if ! echo "$response" | jq -e '.runners and (.runners | type == "array")' > /dev/null; then
+              echo "Runner API response invalid; skipping this check"
+              echo "api_ok=false" >> $GITHUB_OUTPUT
+              echo "should_notify=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          echo "api_ok=true" >> $GITHUB_OUTPUT
           # Save response for label management step
           echo "$response" > runners_response.json
 
@@ -79,11 +101,6 @@ jobs:
           echo "::group::previous_stats"
           echo "$previous_stats"
           echo "::endgroup::"
-
-          # Initialize arrays for notifications
-          newly_offline_runners=()
-          persistent_offline_runners=()
-          back_online_runners=()
 
           # Initialize new stats structure
           new_stats=$(echo "$previous_stats" | jq --arg time "$current_time" '.last_cleanup = $time')
@@ -104,6 +121,8 @@ jobs:
           echo "::endgroup::"
 
           # Process current runners
+          : > current_runners.tmp
+          : > current_runner_states.tmp
           echo "$response" | jq -r '.runners[] | "\(.name)|\(.status)|\(.busy)|\(.labels | map(.name) | join(","))"' | while IFS='|' read -r name status busy labels; do
             if [ -z "$name" ]; then continue; fi
             echo "::group::Processing runner: $name"
@@ -194,6 +213,17 @@ jobs:
           # Save new state
           echo "$new_state" > "${{ env.STATE_FILE }}"
 
+          # Detect newly added or removed runners
+          if [ -f "current_runners.tmp" ]; then
+            prev_file=$(mktemp)
+            curr_file=$(mktemp)
+            echo "$previous_state" | jq -r '.runners | keys[]' | sort > "$prev_file"
+            awk -F',' '{print $1}' current_runners.tmp | sort > "$curr_file"
+            comm -13 "$prev_file" "$curr_file" > new_runners.tmp
+            comm -23 "$prev_file" "$curr_file" > removed_runners.tmp
+            rm -f "$prev_file" "$curr_file"
+          fi
+
           # Prepare notification messages
           notification_message=""
 
@@ -211,6 +241,38 @@ jobs:
             notification_message+="\n"
           fi
 
+          # Check for newly added runners
+          if [ -f "new_runners.tmp" ] && [ -s "new_runners.tmp" ]; then
+            notification_message+="🆕 **New runners detected:**\n\n"
+            while IFS= read -r name; do
+              if [ -n "$name" ]; then
+                labels=$(awk -F',' -v runner="$name" '$1 == runner {print $4}' current_runners.tmp | head -n 1)
+                if [ -n "$labels" ] && [ "$labels" != "" ]; then
+                  notification_message+="- \`$name\` (labels: \`$labels\`)\n"
+                else
+                  notification_message+="- \`$name\` (no labels)\n"
+                fi
+              fi
+            done < new_runners.tmp
+            notification_message+="\n"
+          fi
+
+          # Check for removed runners
+          if [ -f "removed_runners.tmp" ] && [ -s "removed_runners.tmp" ]; then
+            notification_message+="🗑️ **Runners removed:**\n\n"
+            while IFS= read -r name; do
+              if [ -n "$name" ]; then
+                labels=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].labels // ""')
+                if [ -n "$labels" ] && [ "$labels" != "" ]; then
+                  notification_message+="- \`$name\` (last known labels: \`$labels\`)\n"
+                else
+                  notification_message+="- \`$name\` (no labels)\n"
+                fi
+              fi
+            done < removed_runners.tmp
+            notification_message+="\n"
+          fi
+
           # Check for persistently offline runners (≥2 consecutive runs)
           if [ -f "persistent_offline.tmp" ] && [ -s "persistent_offline.tmp" ]; then
             notification_message+="⚠️ **[Runners](https://github.com/organizations/${{ github.repository_owner }}/settings/actions/runners) offline for multiple checks:**\n\n"
@@ -225,14 +287,6 @@ jobs:
             notification_message+="\n"
           fi
 
-          # Check if this is a weekly report trigger
-          is_weekly_report="false"
-          if [ "${{ github.event.schedule }}" = "0 9 * * 1" ] || [ "${{ toJSON(inputs.send_weekly_report) }}" = "true" ]; then
-            is_weekly_report="true"
-          fi
-
-          echo "is_weekly_report=$is_weekly_report" >> $GITHUB_OUTPUT
-
           # Set should_notify output
           if [ -n "$notification_message" ]; then
             echo "should_notify=true" >> $GITHUB_OUTPUT
@@ -245,8 +299,31 @@ jobs:
           echo -e "$notification_message" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
+          # Compute offline runner set for notification de-duplication
+          current_offline_set="[]"
+          if [ -f "persistent_offline.tmp" ] && [ -s "persistent_offline.tmp" ]; then
+            current_offline_set=$(awk -F',' '{print $1}' persistent_offline.tmp | sed 's/PERSISTENT_OFFLINE: //' | sort -u | jq -R . | jq -s -c .)
+          fi
+          last_offline_set=$(echo "$previous_state" | jq -c '.last_notification.offline_set // []')
+          last_message_id=$(echo "$previous_state" | jq -r '.last_notification.message_id // ""')
+
+          should_edit="false"
+          if [ -n "$notification_message" ] && [ -n "$last_message_id" ]; then
+            # Only persistent offline changes force a new message; newly offline (first check) does not.
+            if [ "$current_offline_set" = "$last_offline_set" ] \
+              && [ ! -s "back_online.tmp" ] \
+              && [ ! -s "new_runners.tmp" ] \
+              && [ ! -s "removed_runners.tmp" ]; then
+              should_edit="true"
+            fi
+          fi
+
+          echo "should_edit=$should_edit" >> $GITHUB_OUTPUT
+          echo "last_message_id=$last_message_id" >> $GITHUB_OUTPUT
+          echo "offline_set=$current_offline_set" >> $GITHUB_OUTPUT
+
           # Clean up temp files
-          rm -f newly_offline.tmp persistent_offline.tmp back_online.tmp current_runners.tmp current_runner_states.tmp
+          rm -f newly_offline.tmp persistent_offline.tmp back_online.tmp current_runners.tmp current_runner_states.tmp new_runners.tmp removed_runners.tmp
 
       - name: Find out if there are active bors batches
         id: bors_active
@@ -257,6 +334,7 @@ jobs:
 
       - name: Manage runner labels based on bors status
         id: manage-labels
+        if: steps.check-runners.outputs.api_ok == 'true'
         run: |
           bors_active="${{ steps.bors_active.outputs.result }}"
           echo "Bors active: $bors_active"
@@ -558,16 +636,71 @@ jobs:
 
       - name: Send status message on Zulip
         if: steps.check-runners.outputs.should_notify == 'true'
-        uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
-        with:
-          api-key: ${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}
-          email: ${{ secrets.ZULIP_MONITOR_RUNNERS_BOT_EMAIL }}
-          organization-url: ${{ env.ZULIP_SERVER }}
-          to: ${{ env.ZULIP_CHANNEL }}
-          type: 'stream'
-          topic: 'Runner Status'
-          content: |
-            ${{ steps.check-runners.outputs.message }}
+        id: zulip-status
+        run: |
+          zulip_url="${{ env.ZULIP_SERVER }}"
+          zulip_email="${{ secrets.ZULIP_MONITOR_RUNNERS_BOT_EMAIL }}"
+          zulip_key="${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}"
+          message_id="${{ steps.check-runners.outputs.last_message_id }}"
+
+          content_file=$(mktemp)
+          cat << 'EOF' > "$content_file"
+          ${{ steps.check-runners.outputs.message }}
+          EOF
+
+          if [ "${{ steps.check-runners.outputs.should_edit }}" = "true" ]; then
+            echo "Editing existing Zulip message: $message_id"
+            response=$(curl -s -X PATCH \
+              -u "$zulip_email:$zulip_key" \
+              "$zulip_url/api/v1/messages/$message_id" \
+              --data-urlencode "content@$content_file")
+          else
+            echo "Sending new Zulip message"
+            response=$(curl -s -X POST \
+              -u "$zulip_email:$zulip_key" \
+              "$zulip_url/api/v1/messages" \
+              --data-urlencode "type=stream" \
+              --data-urlencode "to=${{ env.ZULIP_CHANNEL }}" \
+              --data-urlencode "topic=Runner Status" \
+              --data-urlencode "content@$content_file")
+            message_id=$(echo "$response" | jq -r '.id // empty')
+          fi
+
+          if ! echo "$response" | jq -e '.result == "success"' > /dev/null; then
+            echo "ERROR: Zulip API request failed"
+            echo "$response"
+            exit 1
+          fi
+
+          if [ -z "$message_id" ]; then
+            echo "ERROR: Missing Zulip message id"
+            echo "$response"
+            exit 1
+          fi
+
+          echo "message_id=$message_id" >> "$GITHUB_OUTPUT"
+          rm -f "$content_file"
+
+      - name: Update status notification state
+        if: steps.check-runners.outputs.should_notify == 'true'
+        run: |
+          current_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          offline_set='${{ steps.check-runners.outputs.offline_set }}'
+          message_id="${{ steps.zulip-status.outputs.message_id }}"
+
+          state=$(cat "${{ env.STATE_FILE }}")
+          updated_state=$(echo "$state" | jq \
+            --arg time "$current_time" \
+            --arg message_id "$message_id" \
+            --argjson offline_set "$offline_set" \
+            '
+            .last_notification = (.last_notification // {}) |
+            .last_notification.offline_set = $offline_set |
+            .last_notification.message_id = $message_id |
+            .last_notification.updated_at = $time
+            ')
+
+          echo "$updated_state" > "${{ env.STATE_FILE }}"
 
       - name: Send label management notification on Zulip
         if: steps.manage-labels.outputs.has_label_errors == 'true'
