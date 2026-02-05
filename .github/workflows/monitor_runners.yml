@@ -1,7 +1,7 @@
 name: Monitor Self-Hosted Runners
 
 on:
-  # push: # uncomment for testing if on a branch in the azure_scripts repo
+  push: # uncomment for testing if on a branch in the azure_scripts repo
   schedule:
     - cron: '*/15 * * * *' # every 15 minutes
     - cron: '0 9 * * 1' # weekly report every Monday at 9 AM UTC
