@@ -16,12 +16,17 @@ jobs:
     runs-on: ubuntu-latest
     name: Post random issue to zulip for triage
     steps:
+    - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+      id: app-token
+      with:
+        app-id: ${{ secrets.TOKEN_APP_ID }}
+        private-key: ${{ secrets.TOKEN_PRIVATE_KEY }}
 
     - name: Checkout scripts
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     - name: Setup Python
-      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.12'
 
@@ -31,7 +36,7 @@ jobs:
         pip install PyGithub zulip
 
     - name: Post issue on Zulip
-      run: python post_issue_on_zulip.py "${{ secrets.RANDOM_ISSUE_BOT_ZULIP_TOKEN }}" "${{ secrets.LCB_TOKEN }}" "${{ toJSON(github.event_name == 'schedule' || inputs.send_zulip_message) }}"
+      run: python post_issue_on_zulip.py "${{ secrets.RANDOM_ISSUE_BOT_ZULIP_TOKEN }}" "${{ steps.app-token.outputs.token }}" "${{ toJSON(github.event_name == 'schedule' || inputs.send_zulip_message) }}"
 
   workflow-keepalive:
     if: github.event_name == 'schedule'
