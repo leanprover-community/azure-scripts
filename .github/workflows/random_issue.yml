@@ -19,6 +19,7 @@ jobs:
     - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
       id: app-token
       with:
+        owner: ${{ github.repository_owner }}
         app-id: ${{ secrets.TOKEN_APP_ID }}
         private-key: ${{ secrets.TOKEN_PRIVATE_KEY }}
 
