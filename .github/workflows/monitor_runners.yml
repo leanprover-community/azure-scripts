@@ -25,6 +25,12 @@ jobs:
   monitor-runners:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        id: app-token
+        with:
+          app-id: ${{ secrets.LEANPROVER_COMMUNITY_RUNNERS_APP_ID }}
+          private-key: ${{ secrets.LEANPROVER_COMMUNITY_RUNNERS_PRIVATE_KEY }}
+
       - name: Restore previous state
         id: cache-restore
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -60,8 +66,8 @@ jobs:
           echo "Current time: $current_time"
           echo "Fetching organization runners..."
 
-          # Get all self-hosted runners for the organization (the MONITOR_RUNNERS_GITHUB_TOKEN requires admin:org permissions)
-          response=$(curl -s -H "Authorization: token ${{ secrets.MONITOR_RUNNERS_GITHUB_TOKEN }}" \
+          # Get all self-hosted runners for the organization
+          response=$(curl -s -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners")
 
@@ -76,7 +82,7 @@ jobs:
           if ! echo "$response" | jq -e '.runners and (.runners | type == "array")' > /dev/null; then
             echo "Runner API response invalid; retrying once"
             sleep 5
-            response=$(curl -s -H "Authorization: token ${{ secrets.MONITOR_RUNNERS_GITHUB_TOKEN }}" \
+            response=$(curl -s -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners")
             if ! echo "$response" | jq -e '.runners and (.runners | type == "array")' > /dev/null; then
@@ -353,7 +359,7 @@ jobs:
             local label=$3
 
             local update_response=$(curl -s -X POST \
-              -H "Authorization: token ${{ secrets.MONITOR_RUNNERS_GITHUB_TOKEN }}" \
+              -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners/$runner_id/labels" \
               -d "{\"labels\":[\"$label\"]}")
@@ -376,7 +382,7 @@ jobs:
             local label=$3
 
             local update_response=$(curl -s -X DELETE \
-              -H "Authorization: token ${{ secrets.MONITOR_RUNNERS_GITHUB_TOKEN }}" \
+              -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners/$runner_id/labels/$label")
 
