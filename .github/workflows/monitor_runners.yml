@@ -100,7 +100,7 @@ jobs:
             echo "Ignoring ephemeral runners: $ephemeral_names"
           fi
 
-          response=$(echo "$response" | jq '.runners |= [ .runners[] | select([.labels[]? | .name] | index("ephemeral") | not) ]')
+          response=$(echo "$response" | jq '.runners |= map(select([.labels[]? | .name] | index("ephemeral") | not))')
           # Save response for label management step
           echo "$response" > runners_response.json
 
