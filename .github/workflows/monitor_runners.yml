@@ -93,6 +93,14 @@ jobs:
             fi
           fi
           echo "api_ok=true" >> $GITHUB_OUTPUT
+
+          # Filter out ephemeral runners from the response so they don't affect monitoring, stats, or labels.
+          ephemeral_names=$(echo "$response" | jq -c '[.runners[] | select([.labels[]? | .name] | index("ephemeral")) | .name]') || exit 11
+          if [ "$ephemeral_names" != "[]" ]; then
+            echo "Ignoring ephemeral runners: $ephemeral_names"
+          fi
+
+          response=$(echo "$response" | jq '.runners |= map(select([.labels[]? | .name] | index("ephemeral") | not))') || exit 33
           # Save response for label management step
           echo "$response" > runners_response.json
 
