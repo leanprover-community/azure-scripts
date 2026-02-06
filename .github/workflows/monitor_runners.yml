@@ -20,6 +20,7 @@ env:
   STATS_FILE: "runner-stats.json"
   CACHE_KEY: ${{ github.ref == 'refs/heads/master' && 'runner-monitor-state-v4' || 'runner-monitor-state-testing' }}
   STATS_CACHE_KEY: ${{ github.ref == 'refs/heads/master' && 'runner-monitor-stats-v4' || 'runner-monitor-stats-testing' }}
+  DRY_RUN: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   monitor-runners:
@@ -350,6 +351,11 @@ jobs:
         id: manage-labels
         if: steps.check-runners.outputs.api_ok == 'true'
         run: |
+          dry_run="${{ env.DRY_RUN }}"
+          if [ "$dry_run" = "true" ]; then
+            echo "DRY RUN: skipping runner label mutations (non-master branch)"
+          fi
+
           bors_active="${{ steps.bors_active.outputs.result }}"
           echo "Bors active: $bors_active"
 
@@ -365,6 +371,11 @@ jobs:
             local runner_id=$1
             local runner_name=$2
             local label=$3
+
+            if [ "$dry_run" = "true" ]; then
+              label_summary+="🧪 Would add \`$label\` label to runner \`$runner_name\`\n"
+              return 0
+            fi
 
             local update_response=$(curl -s -X POST \
               -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
@@ -388,6 +399,11 @@ jobs:
             local runner_id=$1
             local runner_name=$2
             local label=$3
+
+            if [ "$dry_run" = "true" ]; then
+              label_summary+="🧪 Would remove \`$label\` label from runner \`$runner_name\`\n"
+              return 0
+            fi
 
             local update_response=$(curl -s -X DELETE \
               -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
@@ -652,6 +668,13 @@ jobs:
         if: steps.check-runners.outputs.should_notify == 'true'
         id: zulip-status
         run: |
+          dry_run="${{ env.DRY_RUN }}"
+          if [ "$dry_run" = "true" ]; then
+            echo "DRY RUN: would send Zulip status message"
+            echo "message_id=dry-run" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Ensure that the bot is subscribed to the env.ZULIP_CHANNEL
           # Otherwise it will not have permission to edit its own messages!
           zulip_url="${{ env.ZULIP_SERVER }}"
@@ -700,6 +723,11 @@ jobs:
       - name: Update status notification state
         if: steps.check-runners.outputs.should_notify == 'true'
         run: |
+          if [ "${{ env.DRY_RUN }}" = "true" ]; then
+            echo "DRY RUN: would update status notification state"
+            exit 0
+          fi
+
           current_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           offline_set='${{ steps.check-runners.outputs.offline_set }}'
           message_id="${{ steps.zulip-status.outputs.message_id }}"
@@ -719,7 +747,7 @@ jobs:
           echo "$updated_state" > "${{ env.STATE_FILE }}"
 
       - name: Send label management notification on Zulip
-        if: steps.manage-labels.outputs.has_label_errors == 'true'
+        if: steps.manage-labels.outputs.has_label_errors == 'true' && github.ref == 'refs/heads/master'
         uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
         with:
           api-key: ${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}
@@ -732,7 +760,7 @@ jobs:
             ${{ steps.manage-labels.outputs.label_errors }}
 
       - name: Send weekly report on Zulip
-        if: steps.check-runners.outputs.is_weekly_report == 'true'
+        if: steps.check-runners.outputs.is_weekly_report == 'true' && github.ref == 'refs/heads/master'
         uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
         with:
           api-key: ${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}
