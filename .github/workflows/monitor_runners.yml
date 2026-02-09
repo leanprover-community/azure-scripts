@@ -26,6 +26,8 @@ jobs:
   monitor-runners:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
         id: app-token
         with:
@@ -63,334 +65,15 @@ jobs:
       - name: Check self-hosted runners
         id: check-runners
         run: |
-          current_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          echo "Current time: $current_time"
-          echo "Fetching organization runners..."
-
-          # Get all self-hosted runners for the organization
-          response=$(curl -s -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners")
-
-          # Check if this is a weekly report trigger
-          is_weekly_report="false"
-          if [ "${{ github.event.schedule }}" = "0 9 * * 1" ] || [ "${{ toJSON(inputs.send_weekly_report) }}" = "true" ]; then
-            is_weekly_report="true"
-          fi
-          echo "is_weekly_report=$is_weekly_report" >> $GITHUB_OUTPUT
-
-          # Retry once if the API response is invalid (avoid false notifications)
-          if ! echo "$response" | jq -e '.runners and (.runners | type == "array")' > /dev/null; then
-            echo "Runner API response invalid; retrying once"
-            sleep 5
-            response=$(curl -s -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners")
-            if ! echo "$response" | jq -e '.runners and (.runners | type == "array")' > /dev/null; then
-              echo "Runner API response invalid; skipping this check"
-              echo "api_ok=false" >> $GITHUB_OUTPUT
-              echo "should_notify=false" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          fi
-          echo "api_ok=true" >> $GITHUB_OUTPUT
-
-          full_response="$response"
-          ephemeral_names=$(echo "$full_response" | jq -c '[.runners[] | select([.labels[]? | .name] | index("ephemeral")) | .name]')
-          if [ "$ephemeral_names" != "[]" ]; then
-            echo "Ephemeral runners detected: $ephemeral_names"
-          fi
-
-          # Save full response for label management step
-          echo "$full_response" > runners_response.json
-
-          # Normalize runners for monitoring/stats: collapse ephemerals to stable prefix name.
-          # Note that (| map ...) means that this can handle multiple ephemeral instances backed by the same host
-          response=$(echo "$full_response" | jq '
-            .runners |= (
-              map(
-                . as $r |
-                ($r.labels // [] | map(.name) | index("ephemeral")) as $is_ephemeral |
-                if $is_ephemeral then
-                  .stable_name = ($r.name | split("-") | .[0])
-                else
-                  .stable_name = $r.name
-                end
-              )
-              | sort_by(.stable_name)
-              | group_by(.stable_name)
-              | map(
-                  {
-                    name: (.[0].stable_name),
-                    status: (if any(.[]; .status == "online") then "online" else "offline" end),
-                    busy: (
-                      if any(.[]; .status == "online" and .busy == true) then true
-                      elif any(.[]; .status == "online") then false
-                      else false
-                      end
-                    ),
-                    labels: ([.[].labels[]? | .name] | unique | map({name: .}))
-                  }
-                )
-            )
-          ')
-
-          # Load previous state and stats
-          previous_state=$(cat "${{ env.STATE_FILE }}")
-          previous_stats=$(cat "${{ env.STATS_FILE }}")
-
-          echo "::group::previous_state"
-          echo "$previous_state"
-          echo "::endgroup::"
-
-          echo "::group::previous_stats"
-          echo "$previous_stats"
-          echo "::endgroup::"
-
-          # Initialize new stats structure
-          new_stats=$(echo "$previous_stats" | jq --arg time "$current_time" '.last_cleanup = $time')
-
-          # Clean up stats older than 7 days
-          seven_days_ago=$(date -u -d "7 days ago" +"%Y-%m-%dT%H:%M:%SZ")
-          new_stats=$(echo "$new_stats" | jq --arg cutoff "$seven_days_ago" '
-            .runners = (.runners // {} |
-              to_entries |
-              map(select(.value.history) |
-                .value.history = (.value.history | map(select(.timestamp >= $cutoff)))
-              ) |
-              from_entries
-            )
-          ')
-          echo "::group::new_stats after 7-day cleanup"
-          echo "$new_stats"
-          echo "::endgroup::"
-
-          # Process current runners
-          : > current_runners.tmp
-          : > current_runner_states.tmp
-          echo "$response" | jq -r '.runners[] | "\(.name)|\(.status)|\(.busy)|\(.labels | map(.name) | join(","))"' | while IFS='|' read -r name status busy labels; do
-            if [ -z "$name" ]; then continue; fi
-            echo "::group::Processing runner: $name"
-
-            # Determine runner state (Idle, Active, Offline)
-            if [ "$status" != "online" ]; then
-              runner_state="Offline"
-            elif [ "$busy" = "true" ]; then
-              runner_state="Active"
-            else
-              runner_state="Idle"
-            fi
-            echo "runner_state: $runner_state"
-
-            # Get previous state for this runner
-            prev_status=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].status // "unknown"')
-            prev_consecutive=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].consecutive_offline // 0')
-
-            echo "prev_status: $prev_status"
-            echo "prev_consecutive: $prev_consecutive"
-
-            if [ "$status" != "online" ]; then
-              # Runner is offline
-              if [ "$prev_status" = "online" ] || [ "$prev_status" = "unknown" ]; then
-                # First time offline
-                consecutive_offline=1
-                echo "NEWLY_OFFLINE: $name (labels: $labels)" | tee -a newly_offline.tmp
-              else
-                # Still offline, increment counter
-                consecutive_offline=$((prev_consecutive + 1))
-                if [ "$consecutive_offline" -ge 2 ]; then
-                  echo "PERSISTENT_OFFLINE: $name,$consecutive_offline,$labels" | tee -a persistent_offline.tmp
-                fi
-              fi
-            else
-              # Runner is online
-              consecutive_offline=0
-              if [ "$prev_status" = "offline" ] && [ "$prev_consecutive" -ge 2 ]; then
-                # Runner came back online
-                echo "BACK_ONLINE: $name,$prev_consecutive,$labels" | tee -a back_online.tmp
-              fi
-            fi
-
-            # Update state for this runner
-            echo "updated state:"
-            echo "$name,$status,$consecutive_offline,$labels" | tee -a current_runners.tmp
-
-            # Update stats with current state
-            echo "updated stats:"
-            echo "$name,$runner_state,$labels" | tee -a current_runner_states.tmp
-            echo "::endgroup::"
-          done
-
-          # Update stats file with all current runner states
-          while IFS=',' read -r name state labels; do
-            if [ -n "$name" ]; then
-              new_stats=$(echo "$new_stats" | jq --arg name "$name" --arg state "$state" --arg time "$current_time" --arg labels "$labels" '
-                .runners[$name] = (.runners[$name] // {"history": [], "labels": ""}) |
-                .runners[$name].labels = $labels |
-                .runners[$name].history += [{"timestamp": $time, "state": $state}]
-              ')
-            fi
-          done < current_runner_states.tmp
-
-          echo "::group::new_stats after processing"
-          echo "$new_stats"
-          echo "::endgroup::"
-
-          # Save updated stats
-          echo "$new_stats" > "${{ env.STATS_FILE }}"
-
-          # Build new state file
-          new_state=$(echo "$previous_state" | jq --arg time "$current_time" '.last_run = $time | .runners = {}')
-
-          if [ -f "current_runners.tmp" ]; then
-            while IFS=',' read -r name status consecutive labels; do
-              if [ -n "$name" ]; then
-                new_state=$(echo "$new_state" | jq --arg name "$name" --arg status "$status" --argjson consecutive "$consecutive" --arg labels "$labels" \
-                  '.runners[$name] = {"status": $status, "consecutive_offline": $consecutive, "labels": $labels}')
-              fi
-            done < current_runners.tmp
-
-            echo "::group::Formatted current runners info"
-            cat current_runners.tmp
-            echo "::endgroup::"
-          fi
-
-          # Save new state
-          echo "$new_state" > "${{ env.STATE_FILE }}"
-
-          # Detect newly added or removed runners
-          if [ -f "current_runners.tmp" ]; then
-            prev_file=$(mktemp)
-            curr_file=$(mktemp)
-            echo "$previous_state" | jq -r '.runners | keys[]' | sort > "$prev_file"
-            awk -F',' '{print $1}' current_runners.tmp | sort > "$curr_file"
-            comm -13 "$prev_file" "$curr_file" > new_runners.tmp
-            comm -23 "$prev_file" "$curr_file" > removed_runners.tmp
-            rm -f "$prev_file" "$curr_file"
-
-            # Skip added/removed notifications for ephemeral runners
-            # Build a set of stable names that are ephemeral in the current snapshot (labels in current_runners.tmp).
-            awk -F',' '$4 ~ /(^|,)ephemeral(,|$)/ {print $1}' current_runners.tmp | sort -u > ephemeral_current.tmp
-            # Build a set of stable names that were ephemeral in the previous state (labels stored as comma-separated string).
-            echo "$previous_state" | jq -r '
-              .runners | to_entries[]
-              | select((.value.labels // "") | split(",") | index("ephemeral"))
-              | .key
-            ' | sort -u > ephemeral_prev.tmp
-
-            if [ -s "new_runners.tmp" ] && [ -s "ephemeral_current.tmp" ]; then
-              # Remove any newly added runners that are marked ephemeral in the current snapshot.
-              grep -F -x -v -f ephemeral_current.tmp new_runners.tmp > new_runners.filtered.tmp
-              mv new_runners.filtered.tmp new_runners.tmp
-            fi
-
-            if [ -s "removed_runners.tmp" ] && [ -s "ephemeral_prev.tmp" ]; then
-              # Remove any removed runners that were marked ephemeral in the previous snapshot.
-              grep -F -x -v -f ephemeral_prev.tmp removed_runners.tmp > removed_runners.filtered.tmp
-              mv removed_runners.filtered.tmp removed_runners.tmp
-            fi
-          fi
-
-          # Prepare notification messages
-          notification_message=""
-
-          # Check for runners that came back online
-          if [ -f "back_online.tmp" ] && [ -s "back_online.tmp" ]; then
-            notification_message+="✅ **[Runners](https://github.com/organizations/${{ github.repository_owner }}/settings/actions/runners) back online:**\n\n"
-            while IFS=',' read -r name prev_consecutive labels; do
-              name=$(echo "$name" | sed 's/BACK_ONLINE: //')
-              if [ -n "$labels" ] && [ "$labels" != "" ]; then
-                notification_message+="- \`$name\` (was offline for ${prev_consecutive} checks, labels: \`$labels\`)\n"
-              else
-                notification_message+="- \`$name\` (was offline for ${prev_consecutive} checks, no labels)\n"
-              fi
-            done < back_online.tmp
-            notification_message+="\n"
-          fi
-
-          # Check for newly added runners
-          if [ -f "new_runners.tmp" ] && [ -s "new_runners.tmp" ]; then
-            notification_message+="🆕 **New runners detected:**\n\n"
-            while IFS= read -r name; do
-              if [ -n "$name" ]; then
-                labels=$(awk -F',' -v runner="$name" '$1 == runner {print $4}' current_runners.tmp | head -n 1)
-                if [ -n "$labels" ] && [ "$labels" != "" ]; then
-                  notification_message+="- \`$name\` (labels: \`$labels\`)\n"
-                else
-                  notification_message+="- \`$name\` (no labels)\n"
-                fi
-              fi
-            done < new_runners.tmp
-            notification_message+="\n"
-          fi
-
-          # Check for removed runners
-          if [ -f "removed_runners.tmp" ] && [ -s "removed_runners.tmp" ]; then
-            notification_message+="🗑️ **Runners removed:**\n\n"
-            while IFS= read -r name; do
-              if [ -n "$name" ]; then
-                labels=$(echo "$previous_state" | jq -r --arg name "$name" '.runners[$name].labels // ""')
-                if [ -n "$labels" ] && [ "$labels" != "" ]; then
-                  notification_message+="- \`$name\` (last known labels: \`$labels\`)\n"
-                else
-                  notification_message+="- \`$name\` (no labels)\n"
-                fi
-              fi
-            done < removed_runners.tmp
-            notification_message+="\n"
-          fi
-
-          # Check for persistently offline runners (≥2 consecutive runs)
-          if [ -f "persistent_offline.tmp" ] && [ -s "persistent_offline.tmp" ]; then
-            notification_message+="⚠️ **[Runners](https://github.com/organizations/${{ github.repository_owner }}/settings/actions/runners) offline for multiple checks:**\n\n"
-            while IFS=',' read -r name consecutive labels; do
-              name=$(echo "$name" | sed 's/PERSISTENT_OFFLINE: //')
-              if [ -n "$labels" ] && [ "$labels" != "" ]; then
-                notification_message+="- \`$name\` (${consecutive} consecutive checks, labels: \`$labels\`)\n"
-              else
-                notification_message+="- \`$name\` (${consecutive} consecutive checks, no labels)\n"
-              fi
-            done < persistent_offline.tmp
-            notification_message+="\n"
-          fi
-
-          # Set should_notify output
-          if [ -n "$notification_message" ]; then
-            echo "should_notify=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_notify=false" >> $GITHUB_OUTPUT
-          fi
-
-          # Save message to output
-          echo "message<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$notification_message" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          # Compute offline runner set for notification de-duplication
-          current_offline_set="[]"
-          if [ -f "persistent_offline.tmp" ] && [ -s "persistent_offline.tmp" ]; then
-            current_offline_set=$(awk -F',' '{print $1}' persistent_offline.tmp | sed 's/PERSISTENT_OFFLINE: //' | sort -u | jq -R . | jq -s -c .)
-          fi
-          last_offline_set=$(echo "$previous_state" | jq -c '.last_notification.offline_set // []')
-          last_message_id=$(echo "$previous_state" | jq -r '.last_notification.message_id // ""')
-
-          should_edit="false"
-          if [ -n "$notification_message" ] && [ -n "$last_message_id" ]; then
-            # Only persistent offline changes force a new message; newly offline (first check) does not.
-            if [ "$current_offline_set" = "$last_offline_set" ] \
-              && [ ! -s "back_online.tmp" ] \
-              && [ ! -s "new_runners.tmp" ] \
-              && [ ! -s "removed_runners.tmp" ]; then
-              should_edit="true"
-            fi
-          fi
-
-          echo "should_edit=$should_edit" >> $GITHUB_OUTPUT
-          echo "last_message_id=$last_message_id" >> $GITHUB_OUTPUT
-          echo "offline_set=$current_offline_set" >> $GITHUB_OUTPUT
-
-          # Clean up temp files
-          rm -f newly_offline.tmp persistent_offline.tmp back_online.tmp current_runners.tmp current_runner_states.tmp new_runners.tmp removed_runners.tmp ephemeral_current.tmp ephemeral_prev.tmp
+          python3 -m monitor_runners.workflow check-runners \
+            --token "${{ steps.app-token.outputs.token }}" \
+            --org "${{ github.repository_owner }}" \
+            --state-file "${{ env.STATE_FILE }}" \
+            --stats-file "${{ env.STATS_FILE }}" \
+            --response-file "runners_response.json" \
+            --schedule "${{ github.event.schedule || '' }}" \
+            --send-weekly-report "${{ toJSON(inputs.send_weekly_report) }}" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Find out if there are active bors batches
         id: bors_active
@@ -594,132 +277,9 @@ jobs:
       - name: Generate stats report
         id: weekly-stats
         run: |
-          echo "Generating statistics report..."
-
-          # Load stats
-          stats=$(cat "${{ env.STATS_FILE }}")
-
-          # Get list of runners that have data
-          runners=$(echo "$stats" | jq -r '.runners | keys[]' | sort)
-
-          # Create temporary file for weekly report content
-          weekly_report_file="weekly_report.tmp"
-
-          # Write report header
-          tee > "$weekly_report_file" << 'EOF'
-          📊 **Weekly Runner Statistics Report**
-
-          EOF
-
-          echo "*Period: Last 7 days • Generated: $(date -u +'%Y-%m-%d %H:%M UTC')*" | tee -a "$weekly_report_file"
-          echo "" | tee -a "$weekly_report_file"
-
-          if [ -z "$runners" ]; then
-            echo "No runner data available for the past 7 days." | tee -a "$weekly_report_file"
-          else
-            # Write table header
-            cat >> "$weekly_report_file" << 'EOF'
-          | Runner | Idle | Active | Offline | Labels |
-          |--------|------|---------|---------|--------|
-          EOF
-
-            # Process each runner and write to temp file
-            echo "$runners" | while read -r runner; do
-              if [ -z "$runner" ]; then continue; fi
-              echo "Processing stats for runner: $runner"
-
-              # Calculate percentages using jq
-              runner_stats=$(echo "$stats" | jq -r --arg runner "$runner" '
-                .runners[$runner] as $data |
-                ($data.history | length) as $total |
-                if $total == 0 then
-                  "0.0|0.0|0.0|\($data.labels // "")"
-                else
-                  ($data.history | map(select(.state == "Idle")) | length) as $idle |
-                  ($data.history | map(select(.state == "Active")) | length) as $active |
-                  ($data.history | map(select(.state == "Offline")) | length) as $offline |
-                  (($idle * 100.0 / $total) | .*100 | round / 100) as $idle_pct |
-                  (($active * 100.0 / $total) | .*100 | round / 100) as $active_pct |
-                  (($offline * 100.0 / $total) | .*100 | round / 100) as $offline_pct |
-                  "\($idle_pct)|\($active_pct)|\($offline_pct)|\($data.labels // "")"
-                end
-              ')
-
-              IFS='|' read -r idle_pct active_pct offline_pct labels <<< "$runner_stats"
-
-              # Format labels for display
-              if [ -z "$labels" ] || [ "$labels" = "null" ]; then
-                labels_display="-"
-              else
-                labels_display="\`$labels\`"
-              fi
-
-              echo "| \`$runner\` | ${idle_pct}% | ${active_pct}% | ${offline_pct}% | $labels_display |" | tee -a "$weekly_report_file"
-            done
-
-            # Calculate concurrent state statistics
-            echo "Calculating concurrent state statistics..."
-            concurrent_stats=$(echo "$stats" | jq -r '
-              . as $root |
-              # Get all unique timestamps across all runners
-              [.runners[].history[].timestamp] | unique | sort as $timestamps |
-
-              # For each timestamp, check the state of each runner.
-              # If a runner does not have a state recorded at a specific timestamp,
-              # we use the most recent state before that timestamp,
-              # or default to "Offline" if no prior state exists.
-              $timestamps | map(. as $ts |
-                [$root.runners[] | .history | map(select(.timestamp <= $ts)) | last | .state // "Offline"] |
-                {
-                  timestamp: $ts,
-                  all_idle: (all(. == "Idle")),
-                  all_busy: (all(. == "Active")),
-                  states: .
-                }
-              ) |
-
-              # Calculate percentages
-              length as $total |
-              if $total == 0 then
-                "0.0|0.0"
-              else
-                (map(select(.all_idle)) | length) as $all_idle_count |
-                (map(select(.all_busy)) | length) as $all_busy_count |
-                (($all_idle_count * 100.0 / $total) | .*100 | round / 100) as $all_idle_pct |
-                (($all_busy_count * 100.0 / $total) | .*100 | round / 100) as $all_busy_pct |
-                "\($all_idle_pct)|\($all_busy_pct)"
-              end
-            ')
-
-            IFS='|' read -r all_idle_pct all_busy_pct <<< "$concurrent_stats"
-
-            # Add concurrent statistics to report
-            cat >> "$weekly_report_file" << EOF
-
-          **Overall Statistics:**
-          - **All runners idle**: ${all_idle_pct}% of monitoring periods
-          - **All runners busy**: ${all_busy_pct}% of monitoring periods
-
-          EOF
-
-            # Add legend and footer
-            tee >> "$weekly_report_file" << EOF
-
-          **Legend:**
-          • **Idle**: Runner online but not executing jobs
-          • **Active**: Runner online and executing jobs
-          • **Offline**: Runner not responding
-
-          *Statistics based on $(echo "$stats" | jq -r '[.runners[].history[]] | length') data points collected every 15 minutes.*
-          EOF
-          fi
-
-          echo "weekly_message<<EOF" >> $GITHUB_OUTPUT
-          cat "$weekly_report_file" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          # Clean up temp file
-          rm -f "$weekly_report_file"
+          python3 -m monitor_runners.workflow weekly-report \
+            --stats-file "${{ env.STATS_FILE }}" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Send status message on Zulip
         if: steps.check-runners.outputs.should_notify == 'true'
@@ -816,6 +376,19 @@ jobs:
           content: |
             ${{ steps.manage-labels.outputs.label_errors }}
 
+      - name: Send processing error notification on Zulip
+        if: steps.check-runners.outputs.has_processing_errors == 'true' && github.ref == 'refs/heads/master'
+        uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
+        with:
+          api-key: ${{ secrets.ZULIP_MONITOR_RUNNERS_API_KEY }}
+          email: ${{ secrets.ZULIP_MONITOR_RUNNERS_BOT_EMAIL }}
+          organization-url: ${{ env.ZULIP_SERVER }}
+          to: ${{ env.ZULIP_CHANNEL }}
+          type: 'stream'
+          topic: 'Runner Status'
+          content: |
+            ${{ steps.check-runners.outputs.processing_errors }}
+
       - name: Send weekly report on Zulip
         if: steps.check-runners.outputs.is_weekly_report == 'true' && github.ref == 'refs/heads/master'
         uses: zulip/github-actions-zulip/send-message@e4c8f27c732ba9bd98ac6be0583096dea82feea5 # v1.0.2
@@ -830,14 +403,14 @@ jobs:
             ${{ steps.weekly-stats.outputs.weekly_message }}
 
       - name: Save state to cache
-        if: always() && github.event_name != 'workflow_dispatch'
+        if: always() && (github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/master') # On manual run of test branches it's okay to upload: the cache key won't collide
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ${{ env.STATE_FILE }}
           key: ${{ env.CACHE_KEY }}-${{ github.run_id }}
 
       - name: Save stats to cache
-        if: always() && github.event_name != 'workflow_dispatch'
+        if: always() && (github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/master')  # On manual run of test branches it's okay to upload: the cache key won't collide
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ${{ env.STATS_FILE }}

@@ -1,0 +1,360 @@
+{
+  "total_count": 10,
+  "runners": [
+    {
+      "id": 26403,
+      "name": "hoskinson1",
+      "os": "Linux",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 106,
+      "name": "hoskinson2",
+      "os": "Linux",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "pr",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "doc-gen",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 27614,
+      "name": "hoskinson-20260209201215",
+      "os": "Linux",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "pr",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "ephemeral",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "name": "hoskinson3",
+      "os": "Linux",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "pr",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "doc-gen",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 1084,
+      "name": "hoskinson4",
+      "os": "Linux",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "pr",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 1085,
+      "name": "hoskinson5",
+      "os": "Linux",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "pr",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 1089,
+      "name": "hoskinson6",
+      "os": "Linux",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "pr",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 1088,
+      "name": "hoskinson7",
+      "os": "Linux",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "pr",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 2307,
+      "name": "hoskinson8",
+      "os": "Linux",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "pr",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 1041,
+      "name": "hoskinson9",
+      "os": "Linux",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        {
+          "id": 0,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "Linux",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "X64",
+          "type": "read-only"
+        },
+        {
+          "id": 0,
+          "name": "pr",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "bors",
+          "type": "custom"
+        },
+        {
+          "id": 0,
+          "name": "lean4checker",
+          "type": "custom"
+        }
+      ]
+    }
+  ]
+}
