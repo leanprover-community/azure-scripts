@@ -182,6 +182,45 @@ class AlertPlannerTests(unittest.TestCase):
         self.assertEqual(plan.last_message_id, "123456")
         self.assertIn("offline for multiple checks", plan.message)
 
+    def test_should_edit_when_only_persistent_absent_unchanged(self) -> None:
+        """Planner should keep alerting absent hosts and prefer edit-in-place.
+
+        Scenario:
+        - One host remains absent (consecutive_missing >= 2) without a new
+          absent-entry transition on this run.
+        - Last notification tracks the same offline set and has message id.
+
+        Expected behavior:
+        - Notification is emitted with "absent ... multiple checks" wording.
+        - `should_edit` is true because this is a steady-state update.
+        """
+        planner = AlertPlanner()
+        transitions = [
+            HostTransition(
+                host="hoskinson6",
+                new_state=RunnerState(
+                    status=RunnerStatus.ABSENT,
+                    consecutive_offline=0,
+                    consecutive_missing=4,
+                    labels="self-hosted,Linux,X64,pr,bors",
+                ),
+                sample_state=SampleState.OFFLINE,
+                became_absent=False,
+            )
+        ]
+        last = LastNotification(
+            offline_set=["hoskinson6"],
+            message_id="abs-1",
+            updated_at="2026-02-09T11:30:00Z",
+        )
+
+        plan = planner.build(transitions, last)
+
+        self.assertTrue(plan.should_notify)
+        self.assertTrue(plan.should_edit)
+        self.assertEqual(plan.offline_set, ["hoskinson6"])
+        self.assertIn("absent from API payload for multiple checks", plan.message)
+
     def test_no_edit_when_back_online_exists(self) -> None:
         """Back-online events should force a new message instead of edit-only path.
 

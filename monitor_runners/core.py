@@ -195,7 +195,7 @@ class HostStateMachine:
         MISSING_1 (status=offline, consecutive_missing=1)
         | missing again
         v
-        ABSENT (status=absent, consecutive_missing>=2, alert once at entry)
+        ABSENT (status=absent, consecutive_missing>=2, entry event on transition)
         | still missing
         v
         ABSENT
@@ -302,7 +302,13 @@ class AlertPlanner:
         # Group transitions by alert-relevant event type.
         back_online = [t for t in transitions if t.back_online_checks is not None]
         newly_present = [t for t in transitions if t.became_newly_present]
-        absent = [t for t in transitions if t.became_absent]
+        absent_entries = [t for t in transitions if t.became_absent]
+        absent_for_multiple = [
+            t
+            for t in transitions
+            if t.new_state.status == RunnerStatus.ABSENT
+            and t.new_state.consecutive_missing >= 2
+        ]
         persistent_offline = [
             t for t in transitions if t.persistent_offline_checks is not None
         ]
@@ -345,16 +351,17 @@ class AlertPlanner:
                 )
             )
 
-        if absent:
+        if absent_for_multiple:
             lines = []
-            for transition in absent:
+            for transition in absent_for_multiple:
                 labels = transition.new_state.labels
+                checks = transition.new_state.consecutive_missing
                 lines.append(
-                    f"- `{transition.host}` (missing from payload for 2 checks, {_format_label_text(labels)})"
+                    f"- `{transition.host}` ({checks} consecutive missing checks, {_format_label_text(labels)})"
                 )
             sections.append(
                 _format_section(
-                    "**Runners absent from API payload:**",
+                    "**Runners absent from API payload for multiple checks:**",
                     lines,
                 )
             )
@@ -379,15 +386,16 @@ class AlertPlanner:
         last_message_id = last_notification.message_id
         last_offline_set = sorted(last_notification.offline_set)
         
-        # Edit-in-place is only for "steady-state persistent offline" updates.
-        # Any recovery/new-absence/new-presence event forces a fresh message.
+        # Edit-in-place is for steady-state "still problematic" updates
+        # (persistent offline and/or persistent absent).
+        # Any recovery/new-absence-entry/new-presence event forces a fresh message.
         should_edit = (
             should_notify
             and bool(last_message_id)
             and offline_set == last_offline_set
             and not back_online
             and not newly_present
-            and not absent
+            and not absent_entries
         )
 
         return AlertPlan(

@@ -136,17 +136,21 @@ class MonitorRunnerBehaviorTests(unittest.TestCase):
         self.assertNotIn("ephemeral", result.new_state["runners"]["hoskinson1"]["labels"])
 
     def test_absent_then_newly_present_notifications(self) -> None:
-        """A host missing twice becomes absent, then reappearance is reported.
+        """A host missing twice becomes absent, keeps alerting, then reappears.
 
         Scenario timeline:
         - Run 0: all hosts present (baseline).
         - Run 1: `hoskinson3` missing from payload once.
         - Run 2: `hoskinson3` missing again.
-        - Run 3: `hoskinson3` present again.
+        - Run 3: `hoskinson3` still missing with last_notification metadata
+          indicating an existing Zulip message for this offline set.
+        - Run 4: `hoskinson3` present again.
 
         Expected behavior:
         - After first miss: status is offline, consecutive_missing=1, no alert.
         - After second miss: status becomes absent and an absent alert is sent.
+        - Third miss keeps alerting and marks should_edit=true when offline set
+          remains unchanged.
         - On reappearance: a newly-present alert is sent and
           consecutive_missing resets to 0.
         """
@@ -168,11 +172,22 @@ class MonitorRunnerBehaviorTests(unittest.TestCase):
             previous_stats=_reload_stats(run1.stats),
             now=_ts(2026, 2, 9, 10, 30),
         )
+        run2_state_with_notification = _reload_state(run2.state)
+        run2_state_with_notification.last_notification.offline_set = ["hoskinson3"]
+        run2_state_with_notification.last_notification.message_id = "22222"
+        run2_state_with_notification.last_notification.updated_at = "2026-02-09T10:30:00Z"
+
         run3 = process_monitoring_run(
-            _payload_obj(_full_payload()),
-            previous_state=_reload_state(run2.state),
+            _payload_obj(_full_payload(missing={"hoskinson3"})),
+            previous_state=run2_state_with_notification,
             previous_stats=_reload_stats(run2.stats),
             now=_ts(2026, 2, 9, 10, 45),
+        )
+        run4 = process_monitoring_run(
+            _payload_obj(_full_payload()),
+            previous_state=_reload_state(run3.state),
+            previous_stats=_reload_stats(run3.stats),
+            now=_ts(2026, 2, 9, 11, 0),
         )
 
         self.assertFalse(run1.should_notify)
@@ -181,15 +196,20 @@ class MonitorRunnerBehaviorTests(unittest.TestCase):
 
         self.assertTrue(run2.should_notify)
         self.assertEqual(run2.new_state["runners"]["hoskinson3"]["status"], "absent")
-        self.assertIn("absent from API payload", run2.message)
+        self.assertIn("absent from API payload for multiple checks", run2.message)
         self.assertIn("`hoskinson3`", run2.message)
         self.assertEqual(run2.offline_set, ["hoskinson3"])
 
         self.assertTrue(run3.should_notify)
-        self.assertIn("newly present in API payload", run3.message)
+        self.assertIn("absent from API payload for multiple checks", run3.message)
         self.assertIn("`hoskinson3`", run3.message)
-        self.assertEqual(run3.new_state["runners"]["hoskinson3"]["status"], "online")
-        self.assertEqual(run3.new_state["runners"]["hoskinson3"]["consecutive_missing"], 0)
+        self.assertTrue(run3.should_edit)
+
+        self.assertTrue(run4.should_notify)
+        self.assertIn("newly present in API payload", run4.message)
+        self.assertIn("`hoskinson3`", run4.message)
+        self.assertEqual(run4.new_state["runners"]["hoskinson3"]["status"], "online")
+        self.assertEqual(run4.new_state["runners"]["hoskinson3"]["consecutive_missing"], 0)
 
     def test_persistent_offline_then_back_online(self) -> None:
         """Offline transitions should alert on persistence and recovery.
