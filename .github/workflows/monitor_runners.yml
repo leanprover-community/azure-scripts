@@ -95,15 +95,45 @@ jobs:
           fi
           echo "api_ok=true" >> $GITHUB_OUTPUT
 
-          # Filter out ephemeral runners from the response so they don't affect monitoring, stats, or labels.
-          ephemeral_names=$(echo "$response" | jq -c '[.runners[] | select([.labels[]? | .name] | index("ephemeral")) | .name]')
+          full_response="$response"
+          ephemeral_names=$(echo "$full_response" | jq -c '[.runners[] | select([.labels[]? | .name] | index("ephemeral")) | .name]')
           if [ "$ephemeral_names" != "[]" ]; then
-            echo "Ignoring ephemeral runners: $ephemeral_names"
+            echo "Ephemeral runners detected: $ephemeral_names"
           fi
 
-          response=$(echo "$response" | jq '.runners |= map(select([.labels[]? | .name] | index("ephemeral") | not))')
-          # Save response for label management step
-          echo "$response" > runners_response.json
+          # Save full response for label management step
+          echo "$full_response" > runners_response.json
+
+          # Normalize runners for monitoring/stats: collapse ephemerals to stable prefix name.
+          # Note that (| map ...) means that this can handle multiple ephemeral instances backed by the same host
+          response=$(echo "$full_response" | jq '
+            .runners |= (
+              map(
+                . as $r |
+                ($r.labels // [] | map(.name) | index("ephemeral")) as $is_ephemeral |
+                if $is_ephemeral then
+                  .stable_name = ($r.name | split("-") | .[0])
+                else
+                  .stable_name = $r.name
+                end
+              )
+              | sort_by(.stable_name)
+              | group_by(.stable_name)
+              | map(
+                  {
+                    name: (.[0].stable_name),
+                    status: (if any(.[]; .status == "online") then "online" else "offline" end),
+                    busy: (
+                      if any(.[]; .status == "online" and .busy == true) then true
+                      elif any(.[]; .status == "online") then false
+                      else false
+                      end
+                    ),
+                    labels: ([.[].labels[]? | .name] | unique | map({name: .}))
+                  }
+                )
+            )
+          ')
 
           # Load previous state and stats
           previous_state=$(cat "${{ env.STATE_FILE }}")
@@ -237,6 +267,28 @@ jobs:
             comm -13 "$prev_file" "$curr_file" > new_runners.tmp
             comm -23 "$prev_file" "$curr_file" > removed_runners.tmp
             rm -f "$prev_file" "$curr_file"
+
+            # Skip added/removed notifications for ephemeral runners
+            # Build a set of stable names that are ephemeral in the current snapshot (labels in current_runners.tmp).
+            awk -F',' '$4 ~ /(^|,)ephemeral(,|$)/ {print $1}' current_runners.tmp | sort -u > ephemeral_current.tmp
+            # Build a set of stable names that were ephemeral in the previous state (labels stored as comma-separated string).
+            echo "$previous_state" | jq -r '
+              .runners | to_entries[]
+              | select((.value.labels // "") | split(",") | index("ephemeral"))
+              | .key
+            ' | sort -u > ephemeral_prev.tmp
+
+            if [ -s "new_runners.tmp" ] && [ -s "ephemeral_current.tmp" ]; then
+              # Remove any newly added runners that are marked ephemeral in the current snapshot.
+              grep -F -x -v -f ephemeral_current.tmp new_runners.tmp > new_runners.filtered.tmp
+              mv new_runners.filtered.tmp new_runners.tmp
+            fi
+
+            if [ -s "removed_runners.tmp" ] && [ -s "ephemeral_prev.tmp" ]; then
+              # Remove any removed runners that were marked ephemeral in the previous snapshot.
+              grep -F -x -v -f ephemeral_prev.tmp removed_runners.tmp > removed_runners.filtered.tmp
+              mv removed_runners.filtered.tmp removed_runners.tmp
+            fi
           fi
 
           # Prepare notification messages
@@ -338,7 +390,7 @@ jobs:
           echo "offline_set=$current_offline_set" >> $GITHUB_OUTPUT
 
           # Clean up temp files
-          rm -f newly_offline.tmp persistent_offline.tmp back_online.tmp current_runners.tmp current_runner_states.tmp new_runners.tmp removed_runners.tmp
+          rm -f newly_offline.tmp persistent_offline.tmp back_online.tmp current_runners.tmp current_runner_states.tmp new_runners.tmp removed_runners.tmp ephemeral_current.tmp ephemeral_prev.tmp
 
       - name: Find out if there are active bors batches
         id: bors_active
@@ -424,17 +476,18 @@ jobs:
 
           cleanup_label="cleanup-soon"
 
-          # Extract runner data (id, name, custom labels), skipping cleanup-soon runners
-          echo "Extracting runner data..."
+          # Extract runner data (id, name, custom labels), skipping cleanup-soon and ephemeral runners
+          echo "Extracting runner data (non-ephemeral)..."
           runner_data=$(echo "$response" | jq -r --arg cleanup_label "$cleanup_label" '
             .runners[]
             | select([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
+            | select([.labels[]? | .name] | index("ephemeral") | not)
             | "\(.id)|\(.name)|\([.labels[] | select(.type == "custom") | .name] | join(","))"
           ')
 
           if [ -z "$runner_data" ]; then
-            echo "ERROR: No runners found"
-            label_errors+="❌ **Label Management Error:** No runners found in organization\n\n"
+            echo "ERROR: No non-ephemeral runners found"
+            label_errors+="❌ **Label Management Error:** No non-ephemeral runners found in organization\n\n"
           else
             # Ensure all runners have 'bors' label
             echo "Checking if all runners have 'bors' label..."
@@ -456,6 +509,8 @@ jobs:
                 | select(
                   ([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
                   and
+                  ([.labels[]? | .name] | index("ephemeral") | not)
+                  and
                   ([.labels[] | select(.type == "custom") | .name] | contains(["pr"]) | not)
                 )
                 | .name
@@ -472,6 +527,7 @@ jobs:
                   .runners[]
                   | select(.status == "online" and .busy == false)
                   | select([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
+                  | select([.labels[]? | .name] | index("ephemeral") | not)
                   | "\(.id)|\(.name)"
                 ' | head -n 1)
 
@@ -481,6 +537,7 @@ jobs:
                     .runners[]
                     | select(.status == "online")
                     | select([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
+                    | select([.labels[]? | .name] | index("ephemeral") | not)
                     | "\(.id)|\(.name)"
                   ' | head -n 1)
                 fi
