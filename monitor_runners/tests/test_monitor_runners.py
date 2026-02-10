@@ -279,6 +279,141 @@ class MonitorRunnerBehaviorTests(unittest.TestCase):
         self.assertIn("`hoskinson4`", run4.message)
         self.assertFalse(run4.should_edit)
 
+    def test_mixed_snapshot_offline_and_absent_emits_single_consistent_alert(self) -> None:
+        """One run with mixed transitions should produce one coherent alert.
+
+        Scenario timeline:
+        - Run 0: all hosts present and online (baseline).
+        - Run 1: `hoskinson3` missing once (first miss, no alert).
+        - Run 2: `hoskinson3` missing again and `hoskinson4` present+offline.
+        - Run 3: `hoskinson3` still missing and `hoskinson4` still present+offline.
+        - Run 4: `hoskinson3` still missing and `hoskinson4` still present+offline.
+        - Run 5: `hoskinson3` still missing and `hoskinson4` now missing once.
+        - Run 6: `hoskinson3` still missing and `hoskinson4` missing again.
+
+        Expected behavior:
+        - `hoskinson3` transitions to absent and triggers alerting.
+        - `hoskinson4` transitions to first-check offline but does not yet
+          trigger persistent-offline alerting.
+        - The run emits exactly one notification decision with one absent section
+          and no persistent-offline section.
+        - On run 3, `hoskinson4` reaches persistent offline and joins `offline_set`.
+        - On run 4, `hoskinson4` remains persistently offline.
+        - On run 5, `hoskinson4` changes from present+offline to missing and is
+          treated as first-miss offline (not persistent, not absent).
+        - On run 6, `hoskinson4` becomes absent.
+        """
+        run0 = process_monitoring_run(
+            _payload_obj(_full_payload()),
+            previous_state=_empty_state(),
+            previous_stats=_empty_stats(),
+            now=_ts(2026, 2, 9, 12, 30),
+        )
+        run1 = process_monitoring_run(
+            _payload_obj(_full_payload(missing={"hoskinson3"})),
+            previous_state=_reload_state(run0.state),
+            previous_stats=_reload_stats(run0.stats),
+            now=_ts(2026, 2, 9, 12, 45),
+        )
+        run2 = process_monitoring_run(
+            _payload_obj(
+                _full_payload(
+                    missing={"hoskinson3"},
+                    overrides={"hoskinson4": {"status": "offline"}},
+                )
+            ),
+            previous_state=_reload_state(run1.state),
+            previous_stats=_reload_stats(run1.stats),
+            now=_ts(2026, 2, 9, 13, 0),
+        )
+        run3 = process_monitoring_run(
+            _payload_obj(
+                _full_payload(
+                    missing={"hoskinson3"},
+                    overrides={"hoskinson4": {"status": "offline"}},
+                )
+            ),
+            previous_state=_reload_state(run2.state),
+            previous_stats=_reload_stats(run2.stats),
+            now=_ts(2026, 2, 9, 13, 15),
+        )
+        run4 = process_monitoring_run(
+            _payload_obj(
+                _full_payload(
+                    missing={"hoskinson3"},
+                    overrides={"hoskinson4": {"status": "offline"}},
+                )
+            ),
+            previous_state=_reload_state(run3.state),
+            previous_stats=_reload_stats(run3.stats),
+            now=_ts(2026, 2, 9, 13, 30),
+        )
+        run5 = process_monitoring_run(
+            _payload_obj(_full_payload(missing={"hoskinson3", "hoskinson4"})),
+            previous_state=_reload_state(run4.state),
+            previous_stats=_reload_stats(run4.stats),
+            now=_ts(2026, 2, 9, 13, 45),
+        )
+        run6 = process_monitoring_run(
+            _payload_obj(_full_payload(missing={"hoskinson3", "hoskinson4"})),
+            previous_state=_reload_state(run5.state),
+            previous_stats=_reload_stats(run5.stats),
+            now=_ts(2026, 2, 9, 14, 0),
+        )
+
+        self.assertFalse(run1.should_notify)
+
+        self.assertTrue(run2.should_notify)
+        self.assertFalse(run2.should_edit)
+        self.assertIn("absent from API payload for multiple checks", run2.message)
+        self.assertEqual(run2.message.count("absent from API payload for multiple checks"), 1)
+        self.assertIn("`hoskinson3`", run2.message)
+        self.assertNotIn("offline for multiple checks", run2.message)
+
+        self.assertEqual(run2.new_state["runners"]["hoskinson4"]["status"], "offline")
+        self.assertEqual(run2.new_state["runners"]["hoskinson4"]["consecutive_offline"], 1)
+        self.assertEqual(run2.offline_set, ["hoskinson3"])
+
+        self.assertTrue(run3.should_notify)
+        self.assertIn("absent from API payload for multiple checks", run3.message)
+        self.assertIn("offline for multiple checks", run3.message)
+        self.assertIn("`hoskinson3`", run3.message)
+        self.assertIn("`hoskinson4`", run3.message)
+        self.assertEqual(run3.new_state["runners"]["hoskinson4"]["status"], "offline")
+        self.assertEqual(run3.new_state["runners"]["hoskinson4"]["consecutive_missing"], 0)
+        self.assertEqual(run3.new_state["runners"]["hoskinson4"]["consecutive_offline"], 2)
+        self.assertEqual(run3.offline_set, ["hoskinson3", "hoskinson4"])
+
+        self.assertTrue(run4.should_notify)
+        self.assertIn("absent from API payload for multiple checks", run4.message)
+        self.assertIn("offline for multiple checks", run4.message)
+        self.assertIn("`hoskinson3`", run4.message)
+        self.assertIn("`hoskinson4`", run4.message)
+        self.assertEqual(run4.new_state["runners"]["hoskinson4"]["status"], "offline")
+        self.assertEqual(run4.new_state["runners"]["hoskinson4"]["consecutive_missing"], 0)
+        self.assertEqual(run4.new_state["runners"]["hoskinson4"]["consecutive_offline"], 3)
+        self.assertEqual(run4.offline_set, ["hoskinson3", "hoskinson4"])
+
+        self.assertTrue(run5.should_notify)
+        self.assertIn("absent from API payload for multiple checks", run5.message)
+        self.assertNotIn("offline for multiple checks", run5.message)
+        self.assertIn("`hoskinson3`", run5.message)
+        self.assertNotIn("`hoskinson4`", run5.message)
+        self.assertEqual(run5.new_state["runners"]["hoskinson4"]["status"], "offline")
+        self.assertEqual(run5.new_state["runners"]["hoskinson4"]["consecutive_missing"], 1)
+        self.assertEqual(run5.new_state["runners"]["hoskinson4"]["consecutive_offline"], 0)
+        self.assertEqual(run5.offline_set, ["hoskinson3"])
+
+        self.assertTrue(run6.should_notify)
+        self.assertIn("absent from API payload for multiple checks", run6.message)
+        self.assertNotIn("offline for multiple checks", run6.message)
+        self.assertIn("`hoskinson3`", run6.message)
+        self.assertIn("`hoskinson4`", run6.message)
+        self.assertEqual(run6.new_state["runners"]["hoskinson4"]["status"], "absent")
+        self.assertEqual(run6.new_state["runners"]["hoskinson4"]["consecutive_missing"], 2)
+        self.assertEqual(run6.new_state["runners"]["hoskinson4"]["consecutive_offline"], 0)
+        self.assertEqual(run6.offline_set, ["hoskinson3", "hoskinson4"])
+
     def test_stats_output_keeps_only_hosts(self) -> None:
         """Stats should drop non-canonical keys and keep 7-day window only.
 
