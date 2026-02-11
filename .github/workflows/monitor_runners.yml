@@ -3,7 +3,7 @@ name: Monitor Self-Hosted Runners
 on:
   # push: # uncomment for testing if on a branch in the azure_scripts repo
   schedule:
-    - cron: '*/15 * * * *' # every 15 minutes
+    - cron: '7/15 * * * *' # every 15 minutes but at :07, :22, :37, :52 to try to make it less likely that github drops the job
     - cron: '0 9 * * 1' # weekly report every Monday at 9 AM UTC
   workflow_dispatch:
     inputs:
