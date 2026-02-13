@@ -114,7 +114,7 @@ class RunnerLabelManager:
        +--> if TRUE: ensure at least one idle runner lacks `pr`
        |    - if already true: no mutation
        |    - else remove `pr` from first idle runner with `pr`
-       |    - if no idle runner exists: emit an error message for tracing
+       |    - if no idle runner exists: log and continue
        |
        +--> if FALSE: add `pr` to each idle runner that:
                 - has `bors` label
@@ -193,9 +193,7 @@ class RunnerLabelManager:
 
         selected_runner = self._select_idle_runner_for_pr_removal()
         if selected_runner is None:
-            self._add_error(
-                "**Label Management Error:** No idle runners available to remove `pr` label from"
-            )
+            print("INFO: No idle runners available to remove `pr` label from")
             return
         self._remove_label(selected_runner, "pr")
 

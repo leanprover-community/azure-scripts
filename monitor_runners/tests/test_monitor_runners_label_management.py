@@ -192,15 +192,14 @@ class RunnerLabelManagerTests(unittest.TestCase):
         self.assertEqual(api.remove_calls, [])
         self.assertIn("already lacks `pr` label", result.label_summary)
 
-    def test_bors_active_with_no_idle_runner_reports_error(self) -> None:
-        """Active bors should error if no idle runner can have `pr` removed.
+    def test_bors_active_with_no_idle_runner_logs_without_error_summary(self) -> None:
+        """Active bors should only log when no idle runner can have `pr` removed.
 
         Scenario:
         - There is no idle runner that can be selected for `pr` removal.
 
         Expected behavior:
         - No remove-label mutation occurs.
-        - Error output explains no idle runner was available.
         """
         payload = _payload(
             [
@@ -214,7 +213,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
         result = manager.apply_policy(bors_active=True)
 
         self.assertEqual(api.remove_calls, [])
-        self.assertIn("No idle runners available", result.label_errors)
+        self.assertEqual(result.label_errors, "")
 
 
 class BorsStatusClientTests(unittest.TestCase):
