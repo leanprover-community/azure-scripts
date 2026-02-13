@@ -22,6 +22,11 @@ from typing import Any, Dict, Optional
 
 from .core import process_monitoring_run
 from .constants import host_for_name
+from .label_management import (
+    BORS_ACTIVE_BATCHES_URL,
+    LabelManagementResult,
+    execute_label_management,
+)
 from .models import GitHubRunnersPayload, MonitorState, MonitorStats
 from .reporting import render_weekly_report
 
@@ -110,6 +115,18 @@ def _write_processing_error_outputs(output_path: str, messages: list[str]) -> No
     else:
         _write_output_line(output_path, "has_processing_errors", "false")
         _write_output_multiline(output_path, "processing_errors", "")
+
+
+def _write_label_management_outputs(output_path: str, result: LabelManagementResult) -> None:
+    """Write label-management outputs consumed by workflow notification steps."""
+    _write_output_line(output_path, "bors_active", str(result.bors_active).lower())
+    _write_output_multiline(output_path, "label_summary", result.label_summary)
+    if result.label_errors:
+        _write_output_multiline(output_path, "label_errors", result.label_errors)
+        _write_output_line(output_path, "has_label_errors", "true")
+    else:
+        _write_output_line(output_path, "label_errors", "")
+        _write_output_line(output_path, "has_label_errors", "false")
 
 
 def _run_check_runners(args: argparse.Namespace) -> int:
@@ -208,6 +225,28 @@ def _run_weekly_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_manage_labels(args: argparse.Namespace) -> int:
+    """Execute label-management step and write label outputs."""
+    dry_run = _to_bool(args.dry_run)
+    if dry_run:
+        print("DRY RUN: skipping runner label mutations (non-master branch)")
+
+    payload = GitHubRunnersPayload.from_dict(_load_json_file(args.response_file))
+    result = execute_label_management(
+        payload=payload,
+        org=args.org,
+        token=args.token,
+        dry_run=dry_run,
+        bors_api_url=args.bors_api_url,
+    )
+    print(f"Bors active: {str(result.bors_active).lower()}")
+    _write_label_management_outputs(args.github_output, result)
+
+    # Keep behavior aligned with the old shell step cleanup.
+    Path(args.response_file).unlink(missing_ok=True)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build CLI parser for workflow subcommands."""
     parser = argparse.ArgumentParser(description="Runner monitor workflow helpers")
@@ -230,6 +269,16 @@ def _build_parser() -> argparse.ArgumentParser:
     weekly.add_argument(
         "--github-output", default=os.environ.get("GITHUB_OUTPUT", "")
     )
+
+    manage = subparsers.add_parser("manage-labels")
+    manage.add_argument("--token", required=True)
+    manage.add_argument("--org", required=True)
+    manage.add_argument("--response-file", default="runners_response.json")
+    manage.add_argument("--dry-run", default="false")
+    manage.add_argument("--bors-api-url", default=BORS_ACTIVE_BATCHES_URL)
+    manage.add_argument(
+        "--github-output", default=os.environ.get("GITHUB_OUTPUT", "")
+    )
     return parser
 
 
@@ -245,6 +294,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _run_check_runners(args)
     if args.command == "weekly-report":
         return _run_weekly_report(args)
+    if args.command == "manage-labels":
+        return _run_manage_labels(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 

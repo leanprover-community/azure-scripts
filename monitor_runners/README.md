@@ -6,9 +6,11 @@ Python package for self-hosted runner monitoring and weekly reporting.
 
 - `core.py`: runner state machine, transition detection, alert planning, and orchestration.
 - `models.py`: typed data models/enums for GitHub payloads, state, and stats.
+- `label_management.py`: bors-aware runner label policy and GitHub label mutation client.
 - `reporting.py`: weekly markdown report generation from stats.
 - `workflow.py`: GitHub Actions CLI entrypoints:
   - `check-runners`
+  - `manage-labels`
   - `weekly-report`
 
 ## Run tests
@@ -23,7 +25,9 @@ Specific files:
 ```bash
 python3 -m unittest -v tests/test_monitor_runners.py
 python3 -m unittest -v tests/test_monitor_runners_core_objects.py
+python3 -m unittest -v tests/test_monitor_runners_label_management.py
 python3 -m unittest -v tests/test_monitor_runners_workflow.py
+python3 -m unittest -v tests/test_monitor_runners_label_management_workflow.py
 ```
 
 Specific test case or method:
