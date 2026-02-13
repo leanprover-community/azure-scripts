@@ -157,20 +157,16 @@ jobs:
             fi
           }
 
-          cleanup_label="cleanup-soon"
-
-          # Extract runner data (id, name, custom labels), skipping cleanup-soon and ephemeral runners
-          echo "Extracting runner data (non-ephemeral)..."
-          runner_data=$(echo "$response" | jq -r --arg cleanup_label "$cleanup_label" '
+          # Extract runner data (id, name, custom labels)
+          echo "Extracting runner data..."
+          runner_data=$(echo "$response" | jq -r '
             .runners[]
-            | select([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
-            | select([.labels[]? | .name] | index("ephemeral") | not)
             | "\(.id)|\(.name)|\([.labels[] | select(.type == "custom") | .name] | join(","))"
           ')
 
           if [ -z "$runner_data" ]; then
-            echo "ERROR: No non-ephemeral runners found"
-            label_errors+="❌ **Label Management Error:** No non-ephemeral runners found in organization\n\n"
+            echo "ERROR: No eligible runners found"
+            label_errors+="❌ **Label Management Error:** No runners found in organization\n\n"
           else
             # Ensure all runners have 'bors' label
             echo "Checking if all runners have 'bors' label..."
@@ -187,13 +183,9 @@ jobs:
               echo "Managing 'pr' labels (bors active - one runner should NOT have 'pr')..."
 
               # Check if there's already a runner without 'pr'
-              runner_without_pr=$(echo "$response" | jq -r --arg cleanup_label "$cleanup_label" '
+              runner_without_pr=$(echo "$response" | jq -r '
                 .runners[]
                 | select(
-                  ([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
-                  and
-                  ([.labels[]? | .name] | index("ephemeral") | not)
-                  and
                   ([.labels[] | select(.type == "custom") | .name] | contains(["pr"]) | not)
                 )
                 | .name
@@ -206,21 +198,17 @@ jobs:
                 echo "All runners have 'pr' - selecting one to remove it from"
 
                 # Find an idle runner first, fall back to any online runner
-                selected_runner=$(echo "$response" | jq -r --arg cleanup_label "$cleanup_label" '
+                selected_runner=$(echo "$response" | jq -r '
                   .runners[]
                   | select(.status == "online" and .busy == false)
-                  | select([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
-                  | select([.labels[]? | .name] | index("ephemeral") | not)
                   | "\(.id)|\(.name)"
                 ' | head -n 1)
 
                 if [ -z "$selected_runner" ]; then
                   echo "No idle runner found, selecting any online runner"
-                  selected_runner=$(echo "$response" | jq -r --arg cleanup_label "$cleanup_label" '
+                  selected_runner=$(echo "$response" | jq -r '
                     .runners[]
                     | select(.status == "online")
-                    | select([.labels[] | select(.type == "custom") | .name] | contains([$cleanup_label]) | not)
-                    | select([.labels[]? | .name] | index("ephemeral") | not)
                     | "\(.id)|\(.name)"
                   ' | head -n 1)
                 fi
@@ -236,21 +224,27 @@ jobs:
               fi
 
             else
-              echo "Managing 'pr' labels (bors inactive - all runners should have 'pr')..."
+              echo "Managing 'pr' labels (bors inactive - restore 'pr' only on idle runners)..."
 
-              all_have_pr=true
-              while IFS='|' read -r runner_id runner_name labels; do
-                # Check if 'pr' is present
-                if [[ ",$labels," != *",pr,"* ]]; then
-                  all_have_pr=false
-                  echo "Adding 'pr' label to runner: $runner_name"
+              idle_runners_without_pr=$(echo "$response" | jq -r '
+                .runners[]
+                | select(.status == "online" and .busy == false)
+                | select(
+                    ([.labels[] | select(.type == "custom") | .name] | contains(["bors"]))
+                    and
+                    ([.labels[] | select(.type == "custom") | .name] | contains(["pr"]) | not)
+                  )
+                | "\(.id)|\(.name)"
+              ')
+
+              if [ -z "$idle_runners_without_pr" ]; then
+                echo "No idle runners missing 'pr' label"
+                label_summary+="✅ No idle runners missing \`pr\` label\n"
+              else
+                while IFS='|' read -r runner_id runner_name; do
+                  echo "Adding 'pr' label to idle runner: $runner_name"
                   add_label "$runner_id" "$runner_name" "pr"
-                fi
-              done <<< "$runner_data"
-
-              if [ "$all_have_pr" = true ]; then
-                echo "All runners already have 'pr' label"
-                label_summary+="✅ All runners already have \`pr\` label\n"
+                done <<< "$idle_runners_without_pr"
               fi
             fi
           fi
