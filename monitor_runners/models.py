@@ -188,6 +188,7 @@ class RunnerState:
     consecutive_offline: int = 0
     consecutive_missing: int = 0
     labels: str = ""
+    last_known_runner_name: str = ""
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "RunnerState":
@@ -198,6 +199,7 @@ class RunnerState:
             consecutive_offline=int(source.get("consecutive_offline", 0)),
             consecutive_missing=int(source.get("consecutive_missing", 0)),
             labels=str(source.get("labels", "")),
+            last_known_runner_name=str(source.get("last_known_runner_name", "")),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -207,6 +209,7 @@ class RunnerState:
             "consecutive_offline": self.consecutive_offline,
             "consecutive_missing": self.consecutive_missing,
             "labels": self.labels,
+            "last_known_runner_name": self.last_known_runner_name,
         }
 
 

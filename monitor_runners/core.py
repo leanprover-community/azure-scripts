@@ -35,12 +35,16 @@ class HostObservation:
         busy: True if any present+online instance reports ``busy=true``.
         labels: Label names selected for this host snapshot (host
             labels when present, otherwise merged labels from ephemeral instances).
+        latest_runner_name: Most recently observed full runner name from
+            this payload for the host (before host normalization), or empty
+            string if host is missing.
     """
 
     present: bool
     online: bool
     busy: bool
     labels: List[str]
+    latest_runner_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,20 @@ def _format_label_text(labels_csv: str) -> str:
     return "no labels"
 
 
+def _format_last_seen_runner_name_text(full_name: str) -> str:
+    """Format last-seen runner name text for absent-host notifications."""
+    if full_name:
+        return f"last seen as `{full_name}`"
+    return "last full runner name unknown"
+
+
+def _format_current_runner_name_text(full_name: str) -> str:
+    """Format current runner name text for newly-present notifications."""
+    if full_name:
+        return f"currently seen as `{full_name}`"
+    return "current full runner name unknown"
+
+
 def _runner_state(online: bool, busy: bool) -> SampleState:
     """Convert online/busy booleans into Idle/Active/Offline state."""
     if not online:
@@ -130,6 +148,11 @@ def _runner_state(online: bool, busy: bool) -> SampleState:
     if busy:
         return SampleState.ACTIVE
     return SampleState.IDLE
+
+
+def _select_latest_runner_name(entries: Sequence[Dict[str, Any]]) -> str:
+    """Pick the lexicographically largest full runner name for one host."""
+    return max(str(entry["name"]) for entry in entries)
 
 
 def _aggregate_payload(payload: GitHubRunnersPayload) -> Dict[str, HostObservation]:
@@ -156,7 +179,11 @@ def _aggregate_payload(payload: GitHubRunnersPayload) -> Dict[str, HostObservati
         entries = grouped[host]
         if not entries:
             aggregated[host] = HostObservation(
-                present=False, online=False, busy=False, labels=[]
+                present=False,
+                online=False,
+                busy=False,
+                labels=[],
+                latest_runner_name="",
             )
             continue
 
@@ -175,7 +202,11 @@ def _aggregate_payload(payload: GitHubRunnersPayload) -> Dict[str, HostObservati
             labels = _dedupe_labels(merged)
 
         aggregated[host] = HostObservation(
-            present=True, online=online, busy=busy, labels=labels
+            present=True,
+            online=online,
+            busy=busy,
+            labels=labels,
+            latest_runner_name=_select_latest_runner_name(entries),
         )
     return aggregated
 
@@ -228,10 +259,14 @@ class HostStateMachine:
         prev_consecutive_offline = previous.consecutive_offline
         prev_consecutive_missing = previous.consecutive_missing
         prev_labels = previous.labels
+        prev_last_known_runner_name = previous.last_known_runner_name
 
         if observation.present:
             labels_csv = _labels_string(observation.labels) or prev_labels
             became_newly_present = prev_consecutive_missing >= 2
+            last_known_runner_name = (
+                observation.latest_runner_name or prev_last_known_runner_name
+            )
 
             if observation.online:
                 status = RunnerStatus.ONLINE
@@ -259,6 +294,7 @@ class HostStateMachine:
                 consecutive_offline=consecutive_offline,
                 consecutive_missing=0,
                 labels=labels_csv,
+                last_known_runner_name=last_known_runner_name,
             )
             sample_state = _runner_state(online=observation.online, busy=observation.busy)
             return HostTransition(
@@ -279,6 +315,7 @@ class HostStateMachine:
             consecutive_offline=0,
             consecutive_missing=consecutive_missing,
             labels=prev_labels,
+            last_known_runner_name=prev_last_known_runner_name,
         )
         return HostTransition(
             host=host,
@@ -343,7 +380,12 @@ class AlertPlanner:
             lines = []
             for transition in newly_present:
                 labels = transition.new_state.labels
-                lines.append(f"- `{transition.host}` ({_format_label_text(labels)})")
+                full_name_text = _format_current_runner_name_text(
+                    transition.new_state.last_known_runner_name
+                )
+                lines.append(
+                    f"- `{transition.host}` ({full_name_text}, {_format_label_text(labels)})"
+                )
             sections.append(
                 _format_section(
                     "**Runners newly present in API payload:**",
@@ -356,8 +398,11 @@ class AlertPlanner:
             for transition in absent_for_multiple:
                 labels = transition.new_state.labels
                 checks = transition.new_state.consecutive_missing
+                full_name_text = _format_last_seen_runner_name_text(
+                    transition.new_state.last_known_runner_name
+                )
                 lines.append(
-                    f"- `{transition.host}` ({checks} consecutive missing checks, {_format_label_text(labels)})"
+                    f"- `{transition.host}` ({checks} consecutive missing checks, {full_name_text}, {_format_label_text(labels)})"
                 )
             sections.append(
                 _format_section(

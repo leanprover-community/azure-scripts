@@ -279,6 +279,78 @@ class MonitorRunnerBehaviorTests(unittest.TestCase):
         self.assertIn("`hoskinson4`", run4.message)
         self.assertFalse(run4.should_edit)
 
+    def test_absent_and_reappearance_include_last_known_full_runner_name(self) -> None:
+        """Absent and newly-present alerts should include full runner names.
+
+        Scenario timeline:
+        - Run 0: `hoskinson3` is seen only as an ephemeral full runner name.
+        - Run 1: `hoskinson3` missing once.
+        - Run 2: `hoskinson3` missing again (absent alert).
+        - Run 3: `hoskinson3` reappears with a new ephemeral full runner name.
+
+        Expected behavior:
+        - State tracks the last known full runner name while present.
+        - Absent alert includes the last seen full runner name.
+        - Newly-present alert includes the current full runner name after reappearance.
+        """
+        first_full_name = "hoskinson3-1700000000-1"
+        second_full_name = "hoskinson3-1700000000-2"
+
+        run0 = process_monitoring_run(
+            _payload_obj(
+                _full_payload(
+                    missing={"hoskinson3"},
+                    extra_runners=[_runner(first_full_name, status="online", busy=False)],
+                )
+            ),
+            previous_state=_empty_state(),
+            previous_stats=_empty_stats(),
+            now=_ts(2026, 2, 9, 12, 0),
+        )
+        run1 = process_monitoring_run(
+            _payload_obj(_full_payload(missing={"hoskinson3"})),
+            previous_state=_reload_state(run0.state),
+            previous_stats=_reload_stats(run0.stats),
+            now=_ts(2026, 2, 9, 12, 15),
+        )
+        run2 = process_monitoring_run(
+            _payload_obj(_full_payload(missing={"hoskinson3"})),
+            previous_state=_reload_state(run1.state),
+            previous_stats=_reload_stats(run1.stats),
+            now=_ts(2026, 2, 9, 12, 30),
+        )
+        run3 = process_monitoring_run(
+            _payload_obj(
+                _full_payload(
+                    missing={"hoskinson3"},
+                    extra_runners=[_runner(second_full_name, status="online", busy=False)],
+                )
+            ),
+            previous_state=_reload_state(run2.state),
+            previous_stats=_reload_stats(run2.stats),
+            now=_ts(2026, 2, 9, 12, 45),
+        )
+
+        self.assertEqual(
+            run0.new_state["runners"]["hoskinson3"]["last_known_runner_name"],
+            first_full_name,
+        )
+        self.assertTrue(run2.should_notify)
+        self.assertIn("absent from API payload for multiple checks", run2.message)
+        self.assertIn(f"last seen as `{first_full_name}`", run2.message)
+        self.assertEqual(
+            run2.new_state["runners"]["hoskinson3"]["last_known_runner_name"],
+            first_full_name,
+        )
+
+        self.assertTrue(run3.should_notify)
+        self.assertIn("newly present in API payload", run3.message)
+        self.assertIn(f"currently seen as `{second_full_name}`", run3.message)
+        self.assertEqual(
+            run3.new_state["runners"]["hoskinson3"]["last_known_runner_name"],
+            second_full_name,
+        )
+
     def test_mixed_snapshot_offline_and_absent_emits_single_consistent_alert(self) -> None:
         """One run with mixed transitions should produce one coherent alert.
 
