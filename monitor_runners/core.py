@@ -4,7 +4,7 @@ Core run-processing logic for state/stats updates and notifications.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -38,6 +38,12 @@ class HostObservation:
         latest_runner_name: Most recently observed full runner name from
             this payload for the host (before host normalization), or empty
             string if host is missing.
+        duplicate_runners: Non-empty when 2+ runner instances are present for
+            the same host AND at least one of them is offline.  This captures
+            stale registrations left behind when a runner (ephemeral or
+            otherwise) crashes before or during registration and GitHub fails
+            to deregister it.  Each entry is
+            ``{"name": <full-name>, "status": <github-status>}``.
     """
 
     present: bool
@@ -45,6 +51,7 @@ class HostObservation:
     busy: bool
     labels: List[str]
     latest_runner_name: str = ""
+    duplicate_runners: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,9 @@ class HostTransition:
             reaches alerting threshold (>=2), otherwise None.
         back_online_checks: Previous consecutive offline count when a host
             recovers online from an alerting offline streak, otherwise None.
+        duplicate_runners: Forwarded from ``HostObservation``; non-empty when
+            2+ runner instances are present for this host and at least one is
+            offline.
     """
 
     host: str
@@ -73,6 +83,7 @@ class HostTransition:
     became_absent: bool = False
     persistent_offline_checks: Optional[int] = None
     back_online_checks: Optional[int] = None
+    duplicate_runners: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -187,7 +198,10 @@ def _aggregate_payload(payload: GitHubRunnersPayload) -> Dict[str, HostObservati
             )
             continue
 
-        # A host is online if any instance reports online.
+        # A host is online if any instance reports online.  This correctly
+        # handles stale duplicate registrations: if an old offline runner and
+        # a new online runner both map to the same canonical host, the host is
+        # still counted as online.
         online = any(entry["status"] == "online" for entry in entries)
         # A host is busy if any online instance is busy.
         busy = any(entry["status"] == "online" and entry["busy"] for entry in entries)
@@ -201,12 +215,25 @@ def _aggregate_payload(payload: GitHubRunnersPayload) -> Dict[str, HostObservati
                 merged.extend(entry["labels"])
             labels = _dedupe_labels(merged)
 
+        # Detect stale duplicate registrations.  When a runner (ephemeral or
+        # otherwise) crashes before completing registration, GitHub may leave
+        # it in the API payload indefinitely.  The signal for this is: 2+
+        # runners for the same host AND at least one of them is offline.
+        # The normal canonical+ephemeral-running-a-job case has all runners
+        # online, so it does not trigger this condition.
+        duplicate_runners: List[Dict[str, str]] = (
+            [{"name": e["name"], "status": e["status"]} for e in entries]
+            if len(entries) >= 2 and any(e["status"] != "online" for e in entries)
+            else []
+        )
+
         aggregated[host] = HostObservation(
             present=True,
             online=online,
             busy=busy,
             labels=labels,
             latest_runner_name=_select_latest_runner_name(entries),
+            duplicate_runners=duplicate_runners,
         )
     return aggregated
 
@@ -305,6 +332,7 @@ class HostStateMachine:
                 became_absent=False,
                 persistent_offline_checks=persistent_offline_checks,
                 back_online_checks=back_online_checks,
+                duplicate_runners=observation.duplicate_runners,
             )
 
         consecutive_missing = prev_consecutive_missing + 1
@@ -340,6 +368,7 @@ class AlertPlanner:
         back_online = [t for t in transitions if t.back_online_checks is not None]
         newly_present = [t for t in transitions if t.became_newly_present]
         absent_entries = [t for t in transitions if t.became_absent]
+        duplicate_runners = [t for t in transitions if t.duplicate_runners]
         absent_for_multiple = [
             t
             for t in transitions
@@ -426,6 +455,23 @@ class AlertPlanner:
                 )
             )
 
+        if duplicate_runners:
+            lines = []
+            for transition in duplicate_runners:
+                runner_parts = [
+                    f"`{r['name']}` ({r['status']})"
+                    for r in transition.duplicate_runners
+                ]
+                lines.append(
+                    f"- Multiple runners associated with `{transition.host}`: {', '.join(runner_parts)}"
+                )
+            sections.append(
+                _format_section(
+                    "**Runners with multiple registrations (check for stale entries):**",
+                    lines,
+                )
+            )
+
         message = "\n\n".join(sections)
         should_notify = bool(message)
         last_message_id = last_notification.message_id
@@ -433,7 +479,8 @@ class AlertPlanner:
         
         # Edit-in-place is for steady-state "still problematic" updates
         # (persistent offline and/or persistent absent).
-        # Any recovery/new-absence-entry/new-presence event forces a fresh message.
+        # Any recovery/new-absence-entry/new-presence/duplicate-runner event
+        # forces a fresh message.
         should_edit = (
             should_notify
             and bool(last_message_id)
@@ -441,6 +488,7 @@ class AlertPlanner:
             and not back_online
             and not newly_present
             and not absent_entries
+            and not duplicate_runners
         )
 
         return AlertPlan(

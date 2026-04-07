@@ -570,6 +570,123 @@ class MonitorRunnerBehaviorTests(unittest.TestCase):
         self.assertIn("| `hoskinson` | 50.0% | 0.0% | 50.0% |", report)
         self.assertIn("Overall Statistics", report)
 
+    def test_duplicate_runners_notifies_and_counts_online(self) -> None:
+        """Stale offline + new online runners for the same host trigger a notification.
+
+        Scenario:
+        - `hoskinson2` has two registrations in the payload:
+          - `hoskinson2-old` (offline, stale non-ephemeral)
+          - `hoskinson2-new` (online, replacement)
+
+        Expected behavior:
+        - The host is counted as online (any-online rule).
+        - A notification is emitted listing both runner names and their statuses.
+        - The notification is NOT an edit (it's a new event).
+        - `offline_set` does not include the host (it is online).
+        """
+        payload = _full_payload(
+            missing={"hoskinson2"},
+            extra_runners=[
+                _runner("hoskinson2-old", status="offline", labels=["self-hosted", "Linux", "X64", "bors"]),
+                _runner("hoskinson2-new", status="online", labels=["self-hosted", "Linux", "X64", "bors"]),
+            ],
+        )
+
+        result = process_monitoring_run(
+            _payload_obj(payload),
+            previous_state=_empty_state(),
+            previous_stats=_empty_stats(),
+            now=_ts(2026, 2, 9, 15),
+        )
+
+        self.assertEqual(result.new_state["runners"]["hoskinson2"]["status"], "online")
+        self.assertTrue(result.should_notify)
+        self.assertFalse(result.should_edit)
+        self.assertNotIn("hoskinson2", result.offline_set)
+        self.assertIn("Multiple runners associated with `hoskinson2`", result.message)
+        self.assertIn("`hoskinson2-old` (offline)", result.message)
+        self.assertIn("`hoskinson2-new` (online)", result.message)
+
+    def test_stale_ephemeral_alongside_new_ephemeral_triggers_notification(self) -> None:
+        """A crashed ephemeral left behind by GitHub should trigger a notification.
+
+        Scenario:
+        - `hoskinson1` has two ephemeral registrations:
+          - `hoskinson1-old-crashed` (offline, ephemeral — crashed at registration)
+          - `hoskinson1-new-running` (online, ephemeral — the replacement)
+        - The canonical name `hoskinson1` is absent from the payload.
+
+        Expected behavior:
+        - Host is counted as online (any-online rule).
+        - A notification is emitted listing both ephemeral names and statuses.
+        - `offline_set` does not include the host.
+        """
+        payload = _full_payload(
+            missing={"hoskinson1"},
+            extra_runners=[
+                _runner(
+                    "hoskinson1-1000000000-111",
+                    status="offline",
+                    labels=["self-hosted", "Linux", "X64", "bors", "ephemeral"],
+                ),
+                _runner(
+                    "hoskinson1-2000000000-222",
+                    status="online",
+                    busy=True,
+                    labels=["self-hosted", "Linux", "X64", "bors", "ephemeral"],
+                ),
+            ],
+        )
+
+        result = process_monitoring_run(
+            _payload_obj(payload),
+            previous_state=_empty_state(),
+            previous_stats=_empty_stats(),
+            now=_ts(2026, 2, 9, 15, 15),
+        )
+
+        self.assertEqual(result.new_state["runners"]["hoskinson1"]["status"], "online")
+        self.assertTrue(result.should_notify)
+        self.assertFalse(result.should_edit)
+        self.assertNotIn("hoskinson1", result.offline_set)
+        self.assertIn("Multiple runners associated with `hoskinson1`", result.message)
+        self.assertIn("`hoskinson1-1000000000-111` (offline)", result.message)
+        self.assertIn("`hoskinson1-2000000000-222` (online)", result.message)
+
+    def test_canonical_plus_running_ephemeral_does_not_alert(self) -> None:
+        """A canonical runner online alongside a running ephemeral should not alert.
+
+        Scenario:
+        - `hoskinson1` is present as its canonical name (online, not busy).
+        - An ephemeral instance is also online and busy (running a job).
+        - Both runners are online, so no stale duplicate is present.
+
+        Expected behavior:
+        - No duplicate notification is sent.
+        - Host is counted as online.
+        """
+        payload = _full_payload(
+            overrides={"hoskinson1": {"busy": False}},
+            extra_runners=[
+                _runner(
+                    "hoskinson1-1770320856-360031733",
+                    status="online",
+                    busy=True,
+                    labels=["self-hosted", "Linux", "X64", "bors", "ephemeral"],
+                )
+            ],
+        )
+
+        result = process_monitoring_run(
+            _payload_obj(payload),
+            previous_state=_empty_state(),
+            previous_stats=_empty_stats(),
+            now=_ts(2026, 2, 9, 15, 30),
+        )
+
+        self.assertFalse(result.should_notify)
+        self.assertEqual(result.new_state["runners"]["hoskinson1"]["status"], "online")
+
     def test_deserializes_real_github_api_payload_fixture(self) -> None:
         """Real GH API payload should deserialize into host outputs.
 

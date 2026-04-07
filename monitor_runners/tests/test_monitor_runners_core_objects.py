@@ -298,6 +298,51 @@ class AlertPlannerTests(unittest.TestCase):
 
         self.assertEqual(plan.offline_set, ["hoskinson1", "hoskinson2"])
 
+    def test_duplicate_runners_emits_notification(self) -> None:
+        """Stale duplicate runners for a host should produce a notification.
+
+        Scenario:
+        - One host has two runner registrations with one offline (stale).
+        - The host itself is online (any-online aggregation).
+        - No other alertable events.
+
+        Expected behavior:
+        - Notification is emitted with each runner name and status.
+        - `should_edit` is false (new event, not steady-state update).
+        - `offline_set` does not include the host (it is online).
+        """
+        planner = AlertPlanner()
+        transitions = [
+            HostTransition(
+                host="hoskinson3",
+                new_state=RunnerState(
+                    status=RunnerStatus.ONLINE,
+                    consecutive_offline=0,
+                    consecutive_missing=0,
+                    labels="self-hosted,Linux,X64,bors",
+                ),
+                sample_state=SampleState.IDLE,
+                duplicate_runners=[
+                    {"name": "hoskinson3-old", "status": "offline"},
+                    {"name": "hoskinson3-new", "status": "online"},
+                ],
+            )
+        ]
+        last = LastNotification(
+            offline_set=[],
+            message_id="prev-msg",
+            updated_at="2026-02-09T11:00:00Z",
+        )
+
+        plan = planner.build(transitions, last)
+
+        self.assertTrue(plan.should_notify)
+        self.assertFalse(plan.should_edit)
+        self.assertEqual(plan.offline_set, [])
+        self.assertIn("Multiple runners associated with `hoskinson3`", plan.message)
+        self.assertIn("`hoskinson3-old` (offline)", plan.message)
+        self.assertIn("`hoskinson3-new` (online)", plan.message)
+
 
 if __name__ == "__main__":
     unittest.main()
