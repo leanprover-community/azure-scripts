@@ -45,6 +45,10 @@ def _write_json(path: Path, data: dict) -> None:
 class WorkflowErrorNotificationTests(unittest.TestCase):
     """Unit tests for workflow-level processing error outputs."""
 
+    @unittest.skip(
+        "Unidentified-host alerting is disabled while the new fleet stabilizes; "
+        "re-enable together with the commented-out logic in workflow.py."
+    )
     def test_unknown_host_sets_processing_error_output(self) -> None:
         """Unknown API runner names should produce a processing-error notification.
 

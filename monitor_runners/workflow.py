@@ -166,15 +166,17 @@ def _run_check_runners(args: argparse.Namespace) -> int:
         _write_processing_error_outputs(output_path, processing_errors)
         return 0
 
-    # Unknown host names are treated as processing errors but do not block
-    # normal monitor execution for known hosts.
-    unknown_names = _find_unidentified_runner_names(payload)
-    if unknown_names:
-        unknown_list = ", ".join(f"`{name}`" for name in unknown_names)
-        processing_errors.append(
-            "Runner monitor error: unidentified runner host names in GitHub API payload:\n"
-            f"{unknown_list}"
-        )
+    # Unknown host names are skipped by the core aggregation.
+    # TODO: re-enable alerting on unidentified runner host names once the new
+    # fleet stabilizes (also re-enable the skipped test in
+    # tests/test_monitor_runners_workflow.py).
+    # unknown_names = _find_unidentified_runner_names(payload)
+    # if unknown_names:
+    #     unknown_list = ", ".join(f"`{name}`" for name in unknown_names)
+    #     processing_errors.append(
+    #         "Runner monitor error: unidentified runner host names in GitHub API payload:\n"
+    #         f"{unknown_list}"
+    #     )
 
     _write_json_file(args.response_file, payload)
 
