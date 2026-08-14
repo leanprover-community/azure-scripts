@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .constants import host_for_name
 from .models import GitHubRunner, GitHubRunnersPayload
 
 BORS_ACTIVE_BATCHES_URL = "https://mathlib-bors-ca18eefec4cb.herokuapp.com/api/active-batches"
@@ -125,11 +126,22 @@ class RunnerLabelManager:
     - Snapshot-based: no internal cross-run state.
     - Busy runners are never mutated by this state machine. This is because runners are ephemeral and label changes won't matter in this case.
     - Best-effort mutations: collect errors and continue.
+    - Only runners on monitored (hoskinson*) hosts are managed; any other
+      runner in the payload is ignored entirely, so experimental runners are
+      never relabeled.
     """
 
     def __init__(self, payload: GitHubRunnersPayload, api: RunnerLabelApi) -> None:
-        self.payload = payload
         self.api = api
+        self.runners = [
+            runner for runner in payload.runners if host_for_name(runner.name) is not None
+        ]
+        ignored = sorted(
+            runner.name for runner in payload.runners if host_for_name(runner.name) is None
+        )
+        if ignored:
+            ignored_list = ", ".join(f"`{name}`" for name in ignored)
+            print(f"INFO: ignoring unmonitored runner(s) for label management: {ignored_list}")
         self._summary_lines: list[str] = []
         self._error_lines: list[str] = []
 
@@ -169,7 +181,7 @@ class RunnerLabelManager:
 
     def _ensure_bors_labels(self) -> None:
         """Ensure every idle runner includes the `bors` custom label."""
-        for runner in self.payload.runners:
+        for runner in self.runners:
             if runner.busy:
                 continue
             if "bors" not in self._custom_labels(runner):
@@ -177,14 +189,14 @@ class RunnerLabelManager:
 
     def _select_idle_runner_for_pr_removal(self) -> GitHubRunner | None:
         """Pick first idle runner that currently has custom label `pr`."""
-        for runner in self.payload.runners:
+        for runner in self.runners:
             if self._is_idle(runner) and "pr" in self._custom_labels(runner):
                 return runner
         return None
 
     def _manage_pr_labels_when_bors_active(self) -> None:
         """Keep one idle runner without `pr` while bors has active batches."""
-        for runner in self.payload.runners:
+        for runner in self.runners:
             if self._is_idle(runner) and "pr" not in self._custom_labels(runner):
                 self._add_summary(
                     f"Runner `{runner.name}` already lacks `pr` label (no changes needed)"
@@ -200,7 +212,7 @@ class RunnerLabelManager:
     def _manage_pr_labels_when_bors_inactive(self) -> None:
         """Restore missing `pr` only for idle runners that have `bors`."""
         runners_without_pr: list[GitHubRunner] = []
-        for runner in self.payload.runners:
+        for runner in self.runners:
             custom_labels = self._custom_labels(runner)
             if runner.busy:
                 continue
@@ -216,8 +228,8 @@ class RunnerLabelManager:
 
     def apply_policy(self, bors_active: bool) -> LabelManagementResult:
         """Execute label-management policy and return summarized outputs."""
-        if not self.payload.runners:
-            self._add_error("**Label Management Error:** No runners found in organization")
+        if not self.runners:
+            self._add_error("**Label Management Error:** No monitored runners found in organization")
             return LabelManagementResult(
                 bors_active=bors_active,
                 label_summary="\n".join(self._summary_lines),

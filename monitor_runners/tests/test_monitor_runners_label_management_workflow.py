@@ -45,7 +45,7 @@ def _write_payload(path: Path) -> None:
         "runners": [
             {
                 "id": 1,
-                "name": "alpha",
+                "name": "hoskinson1",
                 "status": "online",
                 "busy": False,
                 "os": "Linux",
@@ -199,7 +199,7 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
                 "Dry-run summary (these actions were not taken):",
                 outputs.get("label_summary", ""),
             )
-            self.assertIn("Removed `pr` label from runner `alpha`", outputs.get("label_summary", ""))
+            self.assertIn("Removed `pr` label from runner `hoskinson1`", outputs.get("label_summary", ""))
 
 
 if __name__ == "__main__":

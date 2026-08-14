@@ -93,8 +93,8 @@ class RunnerLabelManagerTests(unittest.TestCase):
         """
         payload = _payload(
             [
-                _runner(101, "alpha", status="online", busy=False, custom_labels=["bors", "pr"]),
-                _runner(102, "beta", status="online", busy=True, custom_labels=["bors", "pr"]),
+                _runner(101, "hoskinson1", status="online", busy=False, custom_labels=["bors", "pr"]),
+                _runner(102, "hoskinson2", status="online", busy=True, custom_labels=["bors", "pr"]),
             ]
         )
         api = _FakeRunnerLabelApi()
@@ -121,11 +121,11 @@ class RunnerLabelManagerTests(unittest.TestCase):
         """
         payload = _payload(
             [
-                _runner(201, "idle-needs-pr", status="online", busy=False, custom_labels=["bors"]),
-                _runner(202, "busy-no-bors", status="online", busy=True, custom_labels=[]),
-                _runner(203, "idle-no-bors", status="online", busy=False, custom_labels=[]),
-                _runner(204, "offline-needs-pr", status="offline", busy=False, custom_labels=["bors"]),
-                _runner(205, "idle-has-pr", status="online", busy=False, custom_labels=["bors", "pr"]),
+                _runner(201, "hoskinson1-idle-needs-pr", status="online", busy=False, custom_labels=["bors"]),
+                _runner(202, "hoskinson2-busy-no-bors", status="online", busy=True, custom_labels=[]),
+                _runner(203, "hoskinson3-idle-no-bors", status="online", busy=False, custom_labels=[]),
+                _runner(204, "hoskinson4-offline-needs-pr", status="offline", busy=False, custom_labels=["bors"]),
+                _runner(205, "hoskinson5-idle-has-pr", status="online", busy=False, custom_labels=["bors", "pr"]),
             ]
         )
         api = _FakeRunnerLabelApi()
@@ -156,8 +156,8 @@ class RunnerLabelManagerTests(unittest.TestCase):
         """
         payload = _payload(
             [
-                _runner(251, "busy-no-pr", status="online", busy=True, custom_labels=["bors"]),
-                _runner(252, "idle-with-pr", status="online", busy=False, custom_labels=["bors", "pr"]),
+                _runner(251, "hoskinson1-busy-no-pr", status="online", busy=True, custom_labels=["bors"]),
+                _runner(252, "hoskinson2-idle-with-pr", status="online", busy=False, custom_labels=["bors", "pr"]),
             ]
         )
         api = _FakeRunnerLabelApi()
@@ -180,8 +180,8 @@ class RunnerLabelManagerTests(unittest.TestCase):
         """
         payload = _payload(
             [
-                _runner(301, "already-no-pr", status="online", busy=False, custom_labels=["bors"]),
-                _runner(302, "with-pr", status="online", busy=False, custom_labels=["bors", "pr"]),
+                _runner(301, "hoskinson1-already-no-pr", status="online", busy=False, custom_labels=["bors"]),
+                _runner(302, "hoskinson2-with-pr", status="online", busy=False, custom_labels=["bors", "pr"]),
             ]
         )
         api = _FakeRunnerLabelApi()
@@ -203,8 +203,8 @@ class RunnerLabelManagerTests(unittest.TestCase):
         """
         payload = _payload(
             [
-                _runner(401, "busy-a", status="online", busy=True, custom_labels=["bors", "pr"]),
-                _runner(402, "busy-b", status="offline", busy=True, custom_labels=["bors", "pr"]),
+                _runner(401, "hoskinson1-busy-a", status="online", busy=True, custom_labels=["bors", "pr"]),
+                _runner(402, "hoskinson2-busy-b", status="offline", busy=True, custom_labels=["bors", "pr"]),
             ]
         )
         api = _FakeRunnerLabelApi()
@@ -214,6 +214,82 @@ class RunnerLabelManagerTests(unittest.TestCase):
 
         self.assertEqual(api.remove_calls, [])
         self.assertEqual(result.label_errors, "")
+
+    def test_unmonitored_runners_are_never_relabeled(self) -> None:
+        """Runners outside the hoskinson naming scheme must never be mutated.
+
+        Scenario:
+        - bors_active is false
+        - One idle monitored runner has `bors` but lacks `pr`.
+        - Two idle experimental runners (non-hoskinson names) lack labels.
+
+        Expected behavior:
+        - Only the monitored runner receives label mutations.
+        """
+        payload = _payload(
+            [
+                _runner(501, "hoskinson1", status="online", busy=False, custom_labels=["bors"]),
+                _runner(502, "experimental-a", status="online", busy=False, custom_labels=[]),
+                _runner(503, "newfleet2-123", status="online", busy=False, custom_labels=["bors"]),
+            ]
+        )
+        api = _FakeRunnerLabelApi()
+        manager = RunnerLabelManager(payload=payload, api=api)
+
+        result = manager.apply_policy(bors_active=False)
+
+        self.assertEqual(api.add_calls, [(501, "pr")])
+        self.assertEqual(api.remove_calls, [])
+        self.assertEqual(result.label_errors, "")
+
+    def test_unmonitored_runner_does_not_satisfy_active_bors_target(self) -> None:
+        """An unmonitored idle runner without `pr` must not count as the free runner.
+
+        Scenario:
+        - bors_active is true
+        - One idle experimental runner (non-hoskinson name) lacks `pr`.
+        - One idle monitored runner still has `pr`.
+
+        Expected behavior:
+        - `pr` is removed from the monitored runner.
+        """
+        payload = _payload(
+            [
+                _runner(551, "experimental-no-pr", status="online", busy=False, custom_labels=["bors"]),
+                _runner(552, "hoskinson1", status="online", busy=False, custom_labels=["bors", "pr"]),
+            ]
+        )
+        api = _FakeRunnerLabelApi()
+        manager = RunnerLabelManager(payload=payload, api=api)
+
+        result = manager.apply_policy(bors_active=True)
+
+        self.assertEqual(api.remove_calls, [(552, "pr")])
+        self.assertEqual(api.add_calls, [])
+        self.assertEqual(result.label_errors, "")
+
+    def test_only_unmonitored_runners_reports_error(self) -> None:
+        """A payload with only unmonitored runners should report a label error.
+
+        Scenario:
+        - The payload contains runners, but none match the hoskinson scheme.
+
+        Expected behavior:
+        - No mutations occur and an error is reported.
+        """
+        payload = _payload(
+            [
+                _runner(601, "experimental-a", status="online", busy=False, custom_labels=[]),
+            ]
+        )
+        api = _FakeRunnerLabelApi()
+        manager = RunnerLabelManager(payload=payload, api=api)
+
+        result = manager.apply_policy(bors_active=False)
+
+        self.assertEqual(api.add_calls, [])
+        self.assertEqual(api.remove_calls, [])
+        self.assertIn("No monitored runners found", result.label_errors)
 
 
 class BorsStatusClientTests(unittest.TestCase):
