@@ -75,12 +75,12 @@ jobs:
             --send-weekly-report "${{ toJSON(inputs.send_weekly_report) }}" \
             --github-output "$GITHUB_OUTPUT"
 
-      # Adds `bors` to idle runners; while bors is active it keeps one idle
-      # runner without `pr`. It adds `pr` back to idle runners only when queued
-      # jobs request the `pr` label, so the smaller baseline pr pool from each
-      # host's own label table stands when nothing is pending
-      # (leanprover-community/docker, github-runner-app/README.md "Runner
-      # labels").
+      # Adds `bors` to idle runners and always keeps one idle runner without
+      # `pr`, reserved so the bors queue keeps moving. It adds `pr` back to the
+      # other idle runners only when queued jobs request the `pr` label, so the
+      # smaller baseline pr pool from each host's own label table stands when
+      # nothing is pending (leanprover-community/docker,
+      # github-runner-app/README.md "Runner labels").
       - name: Manage runner labels
         id: manage-labels
         if: steps.check-runners.outputs.api_ok == 'true'
@@ -263,7 +263,6 @@ jobs:
 
           echo ""
           echo "=== Label Management Summary ==="
-          echo "Bors active: ${{ steps.manage-labels.outputs.bors_active }}"
           echo "Pending pr jobs: ${{ steps.manage-labels.outputs.pr_jobs_pending }}"
           cat << 'EOF'
           ${{ steps.manage-labels.outputs.label_summary }}

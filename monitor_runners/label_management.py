@@ -11,8 +11,6 @@ import urllib.request
 from .constants import host_for_name
 from .models import GitHubRunner, GitHubRunnersPayload
 
-BORS_ACTIVE_BATCHES_URL = "https://mathlib-bors-ca18eefec4cb.herokuapp.com/api/active-batches"
-
 # Repos whose CI queues jobs on runners with the `pr` label.
 PR_JOBS_REPOS = ("mathlib4", "mathlib4-nightly-testing")
 
@@ -25,33 +23,9 @@ MAX_RUNS_TO_INSPECT = 20
 class LabelManagementResult:
     """Label-management outputs written to GITHUB_OUTPUT."""
 
-    bors_active: bool
     pr_jobs_pending: bool | None
     label_summary: str
     label_errors: str
-
-
-class BorsStatusClient:
-    """Queries bors active-batch status with conservative failure fallback."""
-
-    def __init__(self, url: str) -> None:
-        self.url = url
-
-    def has_active_batches(self) -> bool:
-        """Return true when bors has active batches; failures default to true."""
-        request = urllib.request.Request(self.url)
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
-            return True
-
-        if not isinstance(payload, dict):
-            return True
-        batch_ids = payload.get("batch_ids")
-        if isinstance(batch_ids, list):
-            return len(batch_ids) > 0
-        return False
 
 
 class PendingPrJobsClient:
@@ -197,7 +171,8 @@ class RunnerLabelManager:
     [Phase 1] Ensure all idle runners have `bors`
        |
        v
-    [Phase 2] If `bors_active`: ensure at least one idle runner lacks `pr`
+    [Phase 2] Ensure at least one idle runner lacks `pr`, so a runner is
+       always available when a bors batch starts
        - if already true: no mutation
        - else remove `pr` from first idle runner with `pr`
        - if no idle runner exists: log and continue
@@ -208,8 +183,7 @@ class RunnerLabelManager:
        +--> if TRUE: add `pr` to each idle runner that:
        |        - has `bors` label
        |        - lacks `pr` label
-       |    While bors is active, the runner reserved in Phase 2 keeps
-       |    lacking `pr`.
+       |        - is not the runner reserved in Phase 2
        |
        +--> if FALSE: leave `pr` labels unchanged; each host's own label
        |    table stays the baseline (the smaller pr pool stands)
@@ -289,14 +263,21 @@ class RunnerLabelManager:
                 return runner
         return None
 
-    def _manage_pr_labels_when_bors_active(self) -> None:
-        """Keep one idle runner without `pr` while bors has active batches."""
+    def _first_idle_runner_without_pr(self) -> GitHubRunner | None:
+        """Return the first idle runner lacking `pr`: the reserved bors runner."""
         for runner in self.runners:
             if self._is_idle(runner) and "pr" not in self._custom_labels(runner):
-                self._add_summary(
-                    f"Runner `{runner.name}` already lacks `pr` label (no changes needed)"
-                )
-                return
+                return runner
+        return None
+
+    def _ensure_reserved_bors_runner(self) -> None:
+        """Keep at least one idle runner without `pr` so bors batches always start."""
+        reserved = self._first_idle_runner_without_pr()
+        if reserved is not None:
+            self._add_summary(
+                f"Runner `{reserved.name}` already lacks `pr` label (reserved for bors)"
+            )
+            return
 
         selected_runner = self._select_idle_runner_for_pr_removal()
         if selected_runner is None:
@@ -304,47 +285,34 @@ class RunnerLabelManager:
             return
         self._remove_label(selected_runner, "pr")
 
-    def _add_pr_labels_for_pending_jobs(self, reserve_for_bors: bool) -> None:
-        """Add missing `pr` to idle runners with `bors` so pending jobs get picked up."""
+    def _add_pr_labels_for_pending_jobs(self) -> None:
+        """Add missing `pr` to idle runners with `bors` so pending jobs get picked up.
+
+        The reserved bors runner keeps lacking `pr`. When the reservation
+        removed `pr` instead, the snapshot still shows that runner with `pr`,
+        so it is not a candidate either way.
+        """
+        reserved = self._first_idle_runner_without_pr()
         candidates: list[GitHubRunner] = []
         for runner in self.runners:
             custom_labels = self._custom_labels(runner)
-            if runner.busy:
+            if runner.busy or runner is reserved:
                 continue
             if "bors" in custom_labels and "pr" not in custom_labels:
                 candidates.append(runner)
 
-        reserved: GitHubRunner | None = None
-        if reserve_for_bors:
-            # Keep the same runner Phase 2 treated as the free bors runner. If
-            # Phase 2 removed `pr` instead, the snapshot still shows that
-            # runner with `pr`, so it is not a candidate and stays reserved.
-            for runner in self.runners:
-                if self._is_idle(runner) and "pr" not in self._custom_labels(runner):
-                    reserved = runner
-                    break
-        if reserved is not None:
-            candidates = [runner for runner in candidates if runner is not reserved]
-            self._add_summary(
-                f"Kept `pr` label off runner `{reserved.name}` (reserved for bors)"
-            )
-
         if not candidates:
-            if reserved is None:
-                self._add_summary("Pending `pr` jobs, but no idle runner is missing the `pr` label")
+            self._add_summary("Pending `pr` jobs; no `pr` labels to add")
             return
 
         for runner in candidates:
             self._add_label(runner, "pr")
 
-    def apply_policy(
-        self, bors_active: bool, pr_jobs_pending: bool | None
-    ) -> LabelManagementResult:
+    def apply_policy(self, pr_jobs_pending: bool | None) -> LabelManagementResult:
         """Execute label-management policy and return summarized outputs."""
         if not self.runners:
             self._add_error("**Label Management Error:** No monitored runners found in organization")
             return LabelManagementResult(
-                bors_active=bors_active,
                 pr_jobs_pending=pr_jobs_pending,
                 label_summary="\n".join(self._summary_lines),
                 label_errors="\n".join(self._error_lines),
@@ -352,10 +320,9 @@ class RunnerLabelManager:
 
         # Keep `bors` present on idle runners before evaluating `pr` balancing.
         self._ensure_bors_labels()
-        if bors_active:
-            self._manage_pr_labels_when_bors_active()
+        self._ensure_reserved_bors_runner()
         if pr_jobs_pending:
-            self._add_pr_labels_for_pending_jobs(reserve_for_bors=bors_active)
+            self._add_pr_labels_for_pending_jobs()
         elif pr_jobs_pending is None:
             self._add_error(
                 "**Label Management Error:** could not determine pending `pr` jobs; "
@@ -365,7 +332,6 @@ class RunnerLabelManager:
             self._add_summary("No pending `pr` jobs; left `pr` labels unchanged")
 
         return LabelManagementResult(
-            bors_active=bors_active,
             pr_jobs_pending=pr_jobs_pending,
             label_summary="\n".join(self._summary_lines),
             label_errors="\n".join(self._error_lines),
@@ -377,24 +343,21 @@ def execute_label_management(
     org: str,
     token: str,
     dry_run: bool,
-    bors_api_url: str = BORS_ACTIVE_BATCHES_URL,
     pr_jobs_repos: tuple[str, ...] = PR_JOBS_REPOS,
 ) -> LabelManagementResult:
-    """Run queue- and bors-aware label management for one runners payload."""
-    bors_active = BorsStatusClient(bors_api_url).has_active_batches()
+    """Run queue-aware label management for one runners payload."""
     pr_jobs_pending = PendingPrJobsClient(
         org=org, token=token, repos=pr_jobs_repos
     ).has_pending_pr_jobs()
     api = RunnerLabelApi(org=org, token=token, dry_run=dry_run)
     manager = RunnerLabelManager(payload=payload, api=api)
-    result = manager.apply_policy(bors_active=bors_active, pr_jobs_pending=pr_jobs_pending)
+    result = manager.apply_policy(pr_jobs_pending=pr_jobs_pending)
     if dry_run:
         if result.label_summary:
             label_summary = f"Dry-run summary (these actions were not taken):\n{result.label_summary}"
         else:
             label_summary = "Dry-run"
         return LabelManagementResult(
-            bors_active=result.bors_active,
             pr_jobs_pending=result.pr_jobs_pending,
             label_summary=label_summary,
             label_errors=result.label_errors,

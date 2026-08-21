@@ -11,7 +11,6 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monitor_runners.label_management import (
-    BorsStatusClient,
     PendingPrJobsClient,
     RunnerLabelManager,
 )
@@ -83,11 +82,10 @@ class _FakeHttpResponse:
 class RunnerLabelManagerTests(unittest.TestCase):
     """Unit tests for label policy decisions"""
 
-    def test_bors_active_prefers_first_idle_runner_for_pr_removal(self) -> None:
-        """When all runners have `pr`, active bors removes `pr` from a idle runner.
+    def test_reservation_removes_pr_when_every_idle_runner_has_it(self) -> None:
+        """When all idle runners have `pr`, the reservation frees one of them.
 
         Scenario:
-        - bors_active is true
         - One runner is idle and one is busy.
         - Both already have custom labels `bors,pr`.
 
@@ -104,28 +102,29 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=True, pr_jobs_pending=False)
+        result = manager.apply_policy(pr_jobs_pending=False)
 
         self.assertEqual(api.remove_calls, [(101, "pr")])
         self.assertEqual(api.add_calls, [])
         self.assertEqual(result.label_errors, "")
 
-    def test_pending_pr_jobs_restore_pr_for_idle_runners_with_bors(self) -> None:
+    def test_pending_pr_jobs_restore_pr_except_for_reserved_runner(self) -> None:
         """Pending `pr` jobs should restore `pr` for idle eligible runners.
 
         Scenario:
-        - bors_active is false, pr_jobs_pending is true
-        - One online idle runner has `bors` but lacks `pr`.
+        - pr_jobs_pending is true
+        - One online idle runner has `bors` but lacks `pr` (first: reserved).
         - One offline idle runner has `bors` but lacks `pr`.
         - Others are busy, missing `bors`, or already have `pr`.
 
         Expected behavior:
-        - Adds `pr` to both idle runners with `bors` that lack `pr`.
+        - The first idle runner without `pr` stays reserved for bors.
+        - Adds `pr` to the other idle runner with `bors` that lacks `pr`.
         - Adds missing `bors` only for idle runners.
         """
         payload = _payload(
             [
-                _runner(201, "hoskinson1-idle-needs-pr", status="online", busy=False, custom_labels=["bors"]),
+                _runner(201, "hoskinson1-idle-reserved", status="online", busy=False, custom_labels=["bors"]),
                 _runner(202, "hoskinson2-busy-no-bors", status="online", busy=True, custom_labels=[]),
                 _runner(203, "hoskinson3-idle-no-bors", status="online", busy=False, custom_labels=[]),
                 _runner(204, "hoskinson4-offline-needs-pr", status="offline", busy=False, custom_labels=["bors"]),
@@ -135,27 +134,26 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=False, pr_jobs_pending=True)
+        result = manager.apply_policy(pr_jobs_pending=True)
 
-        self.assertIn((201, "pr"), api.add_calls)
+        self.assertNotIn((201, "pr"), api.add_calls)
         self.assertIn((204, "pr"), api.add_calls)
         self.assertIn((203, "bors"), api.add_calls)
         self.assertNotIn((202, "bors"), api.add_calls)
         self.assertNotIn((202, "pr"), api.add_calls)
-        pr_calls = [call for call in api.add_calls if call == (201, "pr")]
-        self.assertEqual(len(pr_calls), 1)
         self.assertEqual(api.remove_calls, [])
+        self.assertIn("reserved for bors", result.label_summary)
         self.assertEqual(result.label_errors, "")
 
-    def test_bors_active_ignores_busy_runner_already_without_pr(self) -> None:
-        """Busy runners lacking `pr` should not satisfy the active-bors target.
+    def test_reservation_ignores_busy_runner_already_without_pr(self) -> None:
+        """Busy runners lacking `pr` should not satisfy the reservation.
 
         Scenario:
         - One busy runner already lacks `pr`.
         - One idle runner still has `pr`.
 
         Expected behavior:
-        - Busy runner is ignored for the active-bors condition.
+        - Busy runner is ignored for the reservation condition.
         - `pr` is removed from the idle runner.
         """
         payload = _payload(
@@ -167,20 +165,20 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=True, pr_jobs_pending=False)
+        result = manager.apply_policy(pr_jobs_pending=False)
 
         self.assertEqual(api.remove_calls, [(252, "pr")])
         self.assertEqual(result.label_errors, "")
 
-    def test_bors_active_keeps_existing_runner_without_pr(self) -> None:
-        """Active bors should be a no-op if a runner already lacks `pr`.
+    def test_reservation_is_noop_when_a_runner_already_lacks_pr(self) -> None:
+        """The reservation should be a no-op if a runner already lacks `pr`.
 
         Scenario:
-        - At least one runner has `bors` but not `pr`.
+        - At least one idle runner has `bors` but not `pr`.
 
         Expected behavior:
         - No remove-label mutation is issued.
-        - Summary records that an eligible runner already lacked `pr`.
+        - Summary records the reserved runner.
         """
         payload = _payload(
             [
@@ -191,13 +189,13 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=True, pr_jobs_pending=False)
+        result = manager.apply_policy(pr_jobs_pending=False)
 
         self.assertEqual(api.remove_calls, [])
         self.assertIn("already lacks `pr` label", result.label_summary)
 
-    def test_bors_active_with_no_idle_runner_logs_without_error_summary(self) -> None:
-        """Active bors should only log when no idle runner can have `pr` removed.
+    def test_reservation_with_no_idle_runner_logs_without_error_summary(self) -> None:
+        """The reservation should only log when no idle runner can have `pr` removed.
 
         Scenario:
         - There is no idle runner that can be selected for `pr` removal.
@@ -214,7 +212,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=True, pr_jobs_pending=False)
+        result = manager.apply_policy(pr_jobs_pending=False)
 
         self.assertEqual(api.remove_calls, [])
         self.assertEqual(result.label_errors, "")
@@ -223,34 +221,35 @@ class RunnerLabelManagerTests(unittest.TestCase):
         """Runners outside the hoskinson naming scheme must never be mutated.
 
         Scenario:
-        - bors_active is false, pr_jobs_pending is true
-        - One idle monitored runner has `bors` but lacks `pr`.
-        - Two idle experimental runners (non-hoskinson names) lack labels.
+        - pr_jobs_pending is true
+        - Two idle monitored runners have `bors` but lack `pr`.
+        - Two idle experimental runners (non-hoskinson names).
 
         Expected behavior:
-        - Only the monitored runner receives label mutations.
+        - The first monitored runner stays reserved for bors.
+        - Only the second monitored runner receives the `pr` label.
         """
         payload = _payload(
             [
                 _runner(501, "hoskinson1", status="online", busy=False, custom_labels=["bors"]),
                 _runner(502, "experimental-a", status="online", busy=False, custom_labels=[]),
                 _runner(503, "newfleet2-123", status="online", busy=False, custom_labels=["bors"]),
+                _runner(504, "hoskinson2", status="online", busy=False, custom_labels=["bors"]),
             ]
         )
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=False, pr_jobs_pending=True)
+        result = manager.apply_policy(pr_jobs_pending=True)
 
-        self.assertEqual(api.add_calls, [(501, "pr")])
+        self.assertEqual(api.add_calls, [(504, "pr")])
         self.assertEqual(api.remove_calls, [])
         self.assertEqual(result.label_errors, "")
 
-    def test_unmonitored_runner_does_not_satisfy_active_bors_target(self) -> None:
+    def test_unmonitored_runner_does_not_satisfy_reservation(self) -> None:
         """An unmonitored idle runner without `pr` must not count as the free runner.
 
         Scenario:
-        - bors_active is true
         - One idle experimental runner (non-hoskinson name) lacks `pr`.
         - One idle monitored runner still has `pr`.
 
@@ -266,7 +265,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=True, pr_jobs_pending=False)
+        result = manager.apply_policy(pr_jobs_pending=False)
 
         self.assertEqual(api.remove_calls, [(552, "pr")])
         self.assertEqual(api.add_calls, [])
@@ -289,7 +288,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=False, pr_jobs_pending=False)
+        result = manager.apply_policy(pr_jobs_pending=False)
 
         self.assertEqual(api.add_calls, [])
         self.assertEqual(api.remove_calls, [])
@@ -299,7 +298,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
         """Without pending `pr` jobs, missing `pr` labels must stay missing.
 
         Scenario:
-        - bors_active is false, pr_jobs_pending is false
+        - pr_jobs_pending is false
         - Two idle runners have `bors` but lack `pr` (the smaller pr pool).
 
         Expected behavior:
@@ -316,7 +315,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=False, pr_jobs_pending=False)
+        result = manager.apply_policy(pr_jobs_pending=False)
 
         self.assertEqual(api.add_calls, [])
         self.assertEqual(api.remove_calls, [])
@@ -327,7 +326,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
         """A failed pending-jobs check must not mutate `pr` labels.
 
         Scenario:
-        - bors_active is false, pr_jobs_pending is None (check failed)
+        - pr_jobs_pending is None (check failed)
         - One idle runner has `bors` but lacks `pr`.
 
         Expected behavior:
@@ -342,17 +341,17 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=False, pr_jobs_pending=None)
+        result = manager.apply_policy(pr_jobs_pending=None)
 
         self.assertEqual(api.add_calls, [])
         self.assertEqual(api.remove_calls, [])
         self.assertIn("could not determine pending `pr` jobs", result.label_errors)
 
-    def test_pending_pr_jobs_with_active_bors_keep_one_runner_reserved(self) -> None:
+    def test_pending_pr_jobs_keep_one_runner_reserved(self) -> None:
         """Pending `pr` jobs must not take the runner reserved for bors.
 
         Scenario:
-        - bors_active is true, pr_jobs_pending is true
+        - pr_jobs_pending is true
         - Two idle runners have `bors` but lack `pr`; one idle runner has both.
 
         Expected behavior:
@@ -370,18 +369,18 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=True, pr_jobs_pending=True)
+        result = manager.apply_policy(pr_jobs_pending=True)
 
         self.assertEqual(api.add_calls, [(902, "pr")])
         self.assertEqual(api.remove_calls, [])
         self.assertIn("reserved for bors", result.label_summary)
         self.assertEqual(result.label_errors, "")
 
-    def test_pending_pr_jobs_with_active_bors_and_full_pool_only_frees_one(self) -> None:
-        """With every idle runner labeled `pr`, active bors still frees one runner.
+    def test_pending_pr_jobs_with_full_pool_only_frees_one_runner(self) -> None:
+        """With every idle runner labeled `pr`, the reservation still frees one.
 
         Scenario:
-        - bors_active is true, pr_jobs_pending is true
+        - pr_jobs_pending is true
         - Both idle runners have `bors` and `pr`.
 
         Expected behavior:
@@ -397,33 +396,11 @@ class RunnerLabelManagerTests(unittest.TestCase):
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(bors_active=True, pr_jobs_pending=True)
+        result = manager.apply_policy(pr_jobs_pending=True)
 
         self.assertEqual(api.remove_calls, [(951, "pr")])
         self.assertEqual(api.add_calls, [])
         self.assertEqual(result.label_errors, "")
-
-
-class BorsStatusClientTests(unittest.TestCase):
-    """Unit tests for bors active-batches API interpretation."""
-
-    def test_has_active_batches_true_for_non_empty_batch_ids(self) -> None:
-        """Non-empty batch list should return active=true."""
-        with patch(
-            "monitor_runners.label_management.urllib.request.urlopen",
-            return_value=_FakeHttpResponse({"batch_ids": [123]}),
-        ):
-            result = BorsStatusClient("https://example.test/api/active-batches").has_active_batches()
-        self.assertTrue(result)
-
-    def test_has_active_batches_defaults_true_on_network_error(self) -> None:
-        """Network errors should conservatively return active=true."""
-        with patch(
-            "monitor_runners.label_management.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("network down"),
-        ):
-            result = BorsStatusClient("https://example.test/api/active-batches").has_active_batches()
-        self.assertTrue(result)
 
 
 def _runs_url(repo: str, status: str) -> str:

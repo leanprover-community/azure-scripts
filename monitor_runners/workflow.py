@@ -23,7 +23,6 @@ from typing import Any, Dict, Optional
 from .core import process_monitoring_run
 from .constants import host_for_name
 from .label_management import (
-    BORS_ACTIVE_BATCHES_URL,
     PR_JOBS_REPOS,
     LabelManagementResult,
     execute_label_management,
@@ -127,7 +126,6 @@ def _pr_jobs_pending_text(pr_jobs_pending: Optional[bool]) -> str:
 
 def _write_label_management_outputs(output_path: str, result: LabelManagementResult) -> None:
     """Write label-management outputs consumed by workflow notification steps."""
-    _write_output_line(output_path, "bors_active", str(result.bors_active).lower())
     _write_output_line(
         output_path, "pr_jobs_pending", _pr_jobs_pending_text(result.pr_jobs_pending)
     )
@@ -253,10 +251,8 @@ def _run_manage_labels(args: argparse.Namespace) -> int:
         org=args.org,
         token=args.token,
         dry_run=dry_run,
-        bors_api_url=args.bors_api_url,
         pr_jobs_repos=pr_jobs_repos,
     )
-    print(f"Bors active: {str(result.bors_active).lower()}")
     print(f"Pending pr jobs: {_pr_jobs_pending_text(result.pr_jobs_pending)}")
     _write_label_management_outputs(args.github_output, result)
 
@@ -293,7 +289,6 @@ def _build_parser() -> argparse.ArgumentParser:
     manage.add_argument("--org", required=True)
     manage.add_argument("--response-file", default="runners_response.json")
     manage.add_argument("--dry-run", default="false")
-    manage.add_argument("--bors-api-url", default=BORS_ACTIVE_BATCHES_URL)
     manage.add_argument("--pr-jobs-repos", default=",".join(PR_JOBS_REPOS))
     manage.add_argument(
         "--github-output", default=os.environ.get("GITHUB_OUTPUT", "")
