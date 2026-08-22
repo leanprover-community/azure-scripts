@@ -71,7 +71,7 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
 
         Expected behavior:
         - command exits 0.
-        - outputs include bors_active/label_summary/label_errors/has_label_errors.
+        - outputs include pr_jobs_pending/label_summary/label_errors/has_label_errors.
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -82,7 +82,7 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
             with patch(
                 "monitor_runners.workflow.execute_label_management",
                 return_value=LabelManagementResult(
-                    bors_active=False,
+                    pr_jobs_pending=True,
                     label_summary="Added `pr` label to runner `alpha`",
                     label_errors="Failed to remove `pr` label from runner `beta`",
                 ),
@@ -105,7 +105,7 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             outputs = _parse_github_output(output_file)
-            self.assertEqual(outputs.get("bors_active"), "false")
+            self.assertEqual(outputs.get("pr_jobs_pending"), "true")
             self.assertEqual(outputs.get("has_label_errors"), "true")
             self.assertIn("Added `pr`", outputs.get("label_summary", ""))
             self.assertIn("Failed to remove `pr`", outputs.get("label_errors", ""))
@@ -130,7 +130,7 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
             with patch(
                 "monitor_runners.workflow.execute_label_management",
                 return_value=LabelManagementResult(
-                    bors_active=True,
+                    pr_jobs_pending=None,
                     label_summary="",
                     label_errors="",
                 ),
@@ -155,6 +155,8 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
             self.assertFalse(response_file.exists())
             self.assertTrue(execute.called)
             self.assertIs(execute.call_args.kwargs.get("dry_run"), True)
+            outputs = _parse_github_output(output_file)
+            self.assertEqual(outputs.get("pr_jobs_pending"), "unknown")
 
     def test_manage_labels_dry_run_summary_has_clear_prefix(self) -> None:
         """Dry-run mode should prefix summary while keeping normal mutation wording.
@@ -174,8 +176,8 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
             _write_payload(response_file)
 
             with patch(
-                "monitor_runners.label_management.BorsStatusClient.has_active_batches",
-                return_value=True,
+                "monitor_runners.label_management.PendingPrJobsClient.has_pending_pr_jobs",
+                return_value=False,
             ):
                 rc = main(
                     [

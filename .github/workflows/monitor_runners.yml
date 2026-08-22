@@ -75,17 +75,15 @@ jobs:
             --send-weekly-report "${{ toJSON(inputs.send_weekly_report) }}" \
             --github-output "$GITHUB_OUTPUT"
 
-      # Label management is paused. It adds `bors` to every idle runner, and it
-      # adds `pr` back to every idle runner whenever bors is quiet, so it undoes
-      # the smaller pr pool that leaves room for the Hetzner runner
-      # (leanprover-community/docker, github-runner-app/README.md "Runner
-      # labels"). The hosts' own table is the only source of runner labels while
-      # this step is off.
-      # TODO: re-enable when the pr pool covers the whole cluster again:
-      # if: steps.check-runners.outputs.api_ok == 'true'
+      # Adds `bors` to idle runners and always keeps one idle runner without
+      # `pr`, reserved so the bors queue keeps moving. It adds `pr` back to the
+      # other idle runners only when queued jobs request the `pr` label, so the
+      # smaller baseline pr pool from each host's own label table stands when
+      # nothing is pending (leanprover-community/docker,
+      # github-runner-app/README.md "Runner labels").
       - name: Manage runner labels
         id: manage-labels
-        if: false
+        if: steps.check-runners.outputs.api_ok == 'true'
         run: |
           python3 -m monitor_runners.workflow manage-labels \
             --token "${{ steps.app-token.outputs.token }}" \
@@ -265,9 +263,7 @@ jobs:
 
           echo ""
           echo "=== Label Management Summary ==="
-          echo "Paused; runner labels come from each host's own table."
-          # TODO: re-enable with the manage-labels step.
-          # echo "Bors active: ${{ steps.manage-labels.outputs.bors_active }}"
+          echo "Pending pr jobs: ${{ steps.manage-labels.outputs.pr_jobs_pending }}"
           cat << 'EOF'
           ${{ steps.manage-labels.outputs.label_summary }}
           EOF
