@@ -11,8 +11,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monitor_runners.label_management import (
-    PendingPrJobsClient,
+    PendingLabeledJobs,
+    PendingLabeledJobsClient,
     RunnerLabelManager,
+    fleet_is_busy,
+    render_pending_labels,
 )
 from monitor_runners.models import GitHubRunnersPayload
 
@@ -42,6 +45,11 @@ def _runner(
 def _payload(runners: list[dict]) -> GitHubRunnersPayload:
     """Build typed payload objects from plain runner dictionaries."""
     return GitHubRunnersPayload.from_dict({"total_count": len(runners), "runners": runners})
+
+
+def _pending(*labels: str, check_failed: bool = False) -> PendingLabeledJobs:
+    """Build a pending-jobs result for policy scenarios."""
+    return PendingLabeledJobs(pending=frozenset(labels), check_failed=check_failed)
 
 
 class _FakeRunnerLabelApi:
@@ -79,332 +87,287 @@ class _FakeHttpResponse:
         return self._raw
 
 
+class FleetIsBusyTests(unittest.TestCase):
+    """Unit tests for the non-hoskinson fleet busy signal."""
+
+    def test_all_online_fleet_runners_busy_is_true(self) -> None:
+        payload = _payload(
+            [
+                _runner(1, "fleet-a", busy=True),
+                _runner(2, "fleet-b", busy=True),
+                _runner(3, "hoskinson1", busy=False),
+            ]
+        )
+        self.assertTrue(fleet_is_busy(payload))
+
+    def test_one_idle_online_fleet_runner_is_false(self) -> None:
+        payload = _payload(
+            [
+                _runner(1, "fleet-a", busy=True),
+                _runner(2, "fleet-b", busy=False),
+            ]
+        )
+        self.assertFalse(fleet_is_busy(payload))
+
+    def test_idle_offline_fleet_runner_does_not_count(self) -> None:
+        payload = _payload(
+            [
+                _runner(1, "fleet-a", busy=True),
+                _runner(2, "fleet-b", status="offline", busy=False),
+            ]
+        )
+        self.assertTrue(fleet_is_busy(payload))
+
+    def test_no_fleet_runners_is_vacuously_true(self) -> None:
+        payload = _payload(
+            [
+                _runner(1, "hoskinson1", busy=False),
+                _runner(2, "hoskinson2", busy=False),
+            ]
+        )
+        self.assertTrue(fleet_is_busy(payload))
+
+    def test_idle_hoskinson_runner_does_not_affect_signal(self) -> None:
+        payload = _payload(
+            [
+                _runner(1, "hoskinson1-20240101", busy=False),
+                _runner(2, "fleet-a", busy=True),
+            ]
+        )
+        self.assertTrue(fleet_is_busy(payload))
+
+
 class RunnerLabelManagerTests(unittest.TestCase):
-    """Unit tests for label policy decisions"""
+    """Unit tests for the standby label policy."""
 
-    def test_reservation_removes_pr_when_every_idle_runner_has_it(self) -> None:
-        """When all idle runners have `pr`, the reservation frees one of them.
+    def test_fleet_busy_and_pending_pr_adds_pr_to_idle_online_runners(self) -> None:
+        """A starved `pr` queue should get standby capacity.
 
         Scenario:
-        - One runner is idle and one is busy.
-        - Both already have custom labels `bors,pr`.
+        - Fleet is busy and queued jobs request `pr`.
+        - One idle online runner lacks `pr`, one already has it.
+        - One idle offline runner and one busy runner also lack `pr`.
 
         Expected behavior:
-        - `pr` is removed from the idle runner.
-        - No labels are added.
+        - `pr` is added only to the idle online runner lacking it.
+        - No removals occur (`pr` is active).
         """
         payload = _payload(
             [
-                _runner(101, "hoskinson1", status="online", busy=False, custom_labels=["bors", "pr"]),
-                _runner(102, "hoskinson2", status="online", busy=True, custom_labels=["bors", "pr"]),
+                _runner(101, "hoskinson1", busy=False, custom_labels=["ephemeral"]),
+                _runner(102, "hoskinson2", busy=False, custom_labels=["ephemeral", "pr"]),
+                _runner(103, "hoskinson3", status="offline", busy=False, custom_labels=["ephemeral"]),
+                _runner(104, "hoskinson4", busy=True, custom_labels=["ephemeral"]),
             ]
         )
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(pr_jobs_pending=False)
+        result = manager.apply_policy(pending_jobs=_pending("pr"), fleet_busy=True)
 
-        self.assertEqual(api.remove_calls, [(101, "pr")])
+        self.assertEqual(api.add_calls, [(101, "pr")])
+        self.assertEqual(api.remove_calls, [])
+        self.assertEqual(result.label_errors, "")
+
+    def test_fleet_busy_with_both_labels_pending_adds_both(self) -> None:
+        """Both standby labels get added when both queues are starved."""
+        payload = _payload(
+            [
+                _runner(201, "hoskinson1", busy=False, custom_labels=["ephemeral"]),
+            ]
+        )
+        api = _FakeRunnerLabelApi()
+        manager = RunnerLabelManager(payload=payload, api=api)
+
+        result = manager.apply_policy(pending_jobs=_pending("pr", "bors"), fleet_busy=True)
+
+        self.assertEqual(api.add_calls, [(201, "pr"), (201, "bors")])
+        self.assertEqual(api.remove_calls, [])
+        self.assertEqual(result.label_errors, "")
+
+    def test_idle_fleet_strips_routing_labels_from_idle_runners(self) -> None:
+        """With idle fleet capacity, idle hoskinson runners return to the unlabeled baseline.
+
+        Scenario:
+        - Fleet is not busy; queued jobs request `pr` (fleet will take them).
+        - Idle runners hold old routing labels, including specialty labels.
+        - One busy runner holds `pr`.
+
+        Expected behavior:
+        - Routing labels are removed from idle runners (offline included).
+        - The busy runner is not mutated; the `ephemeral` marker is kept.
+        """
+        payload = _payload(
+            [
+                _runner(301, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr", "bors"]),
+                _runner(302, "hoskinson7", status="offline", busy=False, custom_labels=["bors", "doc-gen"]),
+                _runner(303, "hoskinson9", busy=True, custom_labels=["bors", "lean4checker"]),
+                _runner(304, "fleet-a", busy=False, custom_labels=["pr", "bors"]),
+            ]
+        )
+        api = _FakeRunnerLabelApi()
+        manager = RunnerLabelManager(payload=payload, api=api)
+
+        result = manager.apply_policy(pending_jobs=_pending("pr"), fleet_busy=False)
+
         self.assertEqual(api.add_calls, [])
+        self.assertEqual(
+            api.remove_calls,
+            [(301, "pr"), (301, "bors"), (302, "bors"), (302, "doc-gen")],
+        )
         self.assertEqual(result.label_errors, "")
 
-    def test_pending_pr_jobs_restore_pr_except_for_reserved_runner(self) -> None:
-        """Pending `pr` jobs should restore `pr` for idle eligible runners.
-
-        Scenario:
-        - pr_jobs_pending is true
-        - One online idle runner has `bors` but lacks `pr` (first: reserved).
-        - One offline idle runner has `bors` but lacks `pr`.
-        - Others are busy, missing `bors`, or already have `pr`.
-
-        Expected behavior:
-        - The first idle runner without `pr` stays reserved for bors.
-        - Adds `pr` to the other idle runner with `bors` that lacks `pr`.
-        - Adds missing `bors` only for idle runners.
-        """
+    def test_fleet_busy_with_pending_pr_strips_inactive_bors(self) -> None:
+        """Only the starved label stays; the other standby label is stripped."""
         payload = _payload(
             [
-                _runner(201, "hoskinson1-idle-reserved", status="online", busy=False, custom_labels=["bors"]),
-                _runner(202, "hoskinson2-busy-no-bors", status="online", busy=True, custom_labels=[]),
-                _runner(203, "hoskinson3-idle-no-bors", status="online", busy=False, custom_labels=[]),
-                _runner(204, "hoskinson4-offline-needs-pr", status="offline", busy=False, custom_labels=["bors"]),
-                _runner(205, "hoskinson5-idle-has-pr", status="online", busy=False, custom_labels=["bors", "pr"]),
+                _runner(401, "hoskinson1", busy=False, custom_labels=["ephemeral", "bors"]),
             ]
         )
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(pr_jobs_pending=True)
+        result = manager.apply_policy(pending_jobs=_pending("pr"), fleet_busy=True)
 
-        self.assertNotIn((201, "pr"), api.add_calls)
-        self.assertIn((204, "pr"), api.add_calls)
-        self.assertIn((203, "bors"), api.add_calls)
-        self.assertNotIn((202, "bors"), api.add_calls)
-        self.assertNotIn((202, "pr"), api.add_calls)
-        self.assertEqual(api.remove_calls, [])
-        self.assertIn("reserved for bors", result.label_summary)
+        self.assertEqual(api.add_calls, [(401, "pr")])
+        self.assertEqual(api.remove_calls, [(401, "bors")])
         self.assertEqual(result.label_errors, "")
 
-    def test_reservation_ignores_busy_runner_already_without_pr(self) -> None:
-        """Busy runners lacking `pr` should not satisfy the reservation.
-
-        Scenario:
-        - One busy runner already lacks `pr`.
-        - One idle runner still has `pr`.
-
-        Expected behavior:
-        - Busy runner is ignored for the reservation condition.
-        - `pr` is removed from the idle runner.
-        """
+    def test_fleet_busy_without_pending_jobs_only_strips(self) -> None:
+        """A busy fleet with an empty queue keeps the standby pool unlabeled."""
         payload = _payload(
             [
-                _runner(251, "hoskinson1-busy-no-pr", status="online", busy=True, custom_labels=["bors"]),
-                _runner(252, "hoskinson2-idle-with-pr", status="online", busy=False, custom_labels=["bors", "pr"]),
+                _runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr"]),
             ]
         )
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(pr_jobs_pending=False)
+        result = manager.apply_policy(pending_jobs=_pending(), fleet_busy=True)
 
-        self.assertEqual(api.remove_calls, [(252, "pr")])
-        self.assertEqual(result.label_errors, "")
-
-    def test_reservation_is_noop_when_a_runner_already_lacks_pr(self) -> None:
-        """The reservation should be a no-op if a runner already lacks `pr`.
-
-        Scenario:
-        - At least one idle runner has `bors` but not `pr`.
-
-        Expected behavior:
-        - No remove-label mutation is issued.
-        - Summary records the reserved runner.
-        """
-        payload = _payload(
-            [
-                _runner(301, "hoskinson1-already-no-pr", status="online", busy=False, custom_labels=["bors"]),
-                _runner(302, "hoskinson2-with-pr", status="online", busy=False, custom_labels=["bors", "pr"]),
-            ]
-        )
-        api = _FakeRunnerLabelApi()
-        manager = RunnerLabelManager(payload=payload, api=api)
-
-        result = manager.apply_policy(pr_jobs_pending=False)
-
-        self.assertEqual(api.remove_calls, [])
-        self.assertIn("already lacks `pr` label", result.label_summary)
-
-    def test_reservation_with_no_idle_runner_logs_without_error_summary(self) -> None:
-        """The reservation should only log when no idle runner can have `pr` removed.
-
-        Scenario:
-        - There is no idle runner that can be selected for `pr` removal.
-
-        Expected behavior:
-        - No remove-label mutation occurs.
-        """
-        payload = _payload(
-            [
-                _runner(401, "hoskinson1-busy-a", status="online", busy=True, custom_labels=["bors", "pr"]),
-                _runner(402, "hoskinson2-busy-b", status="offline", busy=True, custom_labels=["bors", "pr"]),
-            ]
-        )
-        api = _FakeRunnerLabelApi()
-        manager = RunnerLabelManager(payload=payload, api=api)
-
-        result = manager.apply_policy(pr_jobs_pending=False)
-
-        self.assertEqual(api.remove_calls, [])
-        self.assertEqual(result.label_errors, "")
-
-    def test_unmonitored_runners_are_never_relabeled(self) -> None:
-        """Runners outside the hoskinson naming scheme must never be mutated.
-
-        Scenario:
-        - pr_jobs_pending is true
-        - Two idle monitored runners have `bors` but lack `pr`.
-        - Two idle experimental runners (non-hoskinson names).
-
-        Expected behavior:
-        - The first monitored runner stays reserved for bors.
-        - Only the second monitored runner receives the `pr` label.
-        """
-        payload = _payload(
-            [
-                _runner(501, "hoskinson1", status="online", busy=False, custom_labels=["bors"]),
-                _runner(502, "experimental-a", status="online", busy=False, custom_labels=[]),
-                _runner(503, "newfleet2-123", status="online", busy=False, custom_labels=["bors"]),
-                _runner(504, "hoskinson2", status="online", busy=False, custom_labels=["bors"]),
-            ]
-        )
-        api = _FakeRunnerLabelApi()
-        manager = RunnerLabelManager(payload=payload, api=api)
-
-        result = manager.apply_policy(pr_jobs_pending=True)
-
-        self.assertEqual(api.add_calls, [(504, "pr")])
-        self.assertEqual(api.remove_calls, [])
-        self.assertEqual(result.label_errors, "")
-
-    def test_unmonitored_runner_does_not_satisfy_reservation(self) -> None:
-        """An unmonitored idle runner without `pr` must not count as the free runner.
-
-        Scenario:
-        - One idle experimental runner (non-hoskinson name) lacks `pr`.
-        - One idle monitored runner still has `pr`.
-
-        Expected behavior:
-        - `pr` is removed from the monitored runner.
-        """
-        payload = _payload(
-            [
-                _runner(551, "experimental-no-pr", status="online", busy=False, custom_labels=["bors"]),
-                _runner(552, "hoskinson1", status="online", busy=False, custom_labels=["bors", "pr"]),
-            ]
-        )
-        api = _FakeRunnerLabelApi()
-        manager = RunnerLabelManager(payload=payload, api=api)
-
-        result = manager.apply_policy(pr_jobs_pending=False)
-
-        self.assertEqual(api.remove_calls, [(552, "pr")])
         self.assertEqual(api.add_calls, [])
+        self.assertEqual(api.remove_calls, [(501, "pr")])
+        self.assertIn("no pending standby jobs", result.label_summary)
+
+    def test_incomplete_check_without_findings_holds_all_labels(self) -> None:
+        """An incomplete pending-jobs check must not strip any label.
+
+        A label missing from the pending set may still have queued jobs, so
+        removals are skipped and an error line is reported.
+        """
+        payload = _payload(
+            [
+                _runner(601, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr"]),
+            ]
+        )
+        api = _FakeRunnerLabelApi()
+        manager = RunnerLabelManager(payload=payload, api=api)
+
+        result = manager.apply_policy(
+            pending_jobs=_pending(check_failed=True), fleet_busy=True
+        )
+
+        self.assertEqual(api.add_calls, [])
+        self.assertEqual(api.remove_calls, [])
+        self.assertIn("pending-jobs check incomplete", result.label_errors)
+
+    def test_incomplete_check_with_findings_still_adds_labels(self) -> None:
+        """Labels found pending are definite positives even when the check failed."""
+        payload = _payload(
+            [
+                _runner(701, "hoskinson1", busy=False, custom_labels=["ephemeral", "bors"]),
+            ]
+        )
+        api = _FakeRunnerLabelApi()
+        manager = RunnerLabelManager(payload=payload, api=api)
+
+        result = manager.apply_policy(
+            pending_jobs=_pending("pr", check_failed=True), fleet_busy=True
+        )
+
+        self.assertEqual(api.add_calls, [(701, "pr")])
+        self.assertEqual(api.remove_calls, [])
+        self.assertIn("pending-jobs check incomplete", result.label_errors)
+
+    def test_unmonitored_runners_are_never_mutated(self) -> None:
+        """Runners outside the hoskinson naming scheme must never be mutated."""
+        payload = _payload(
+            [
+                _runner(801, "fleet-a", busy=False, custom_labels=["pr", "bors"]),
+                _runner(802, "hoskinson1", busy=False, custom_labels=["ephemeral"]),
+            ]
+        )
+        api = _FakeRunnerLabelApi()
+        manager = RunnerLabelManager(payload=payload, api=api)
+
+        result = manager.apply_policy(pending_jobs=_pending("pr"), fleet_busy=True)
+
+        self.assertEqual(api.add_calls, [(802, "pr")])
+        self.assertEqual(api.remove_calls, [])
+        self.assertEqual(result.label_errors, "")
+
+    def test_draining_runner_is_never_mutated(self) -> None:
+        """A runner carrying `cleanup-soon` must keep its labels untouched.
+
+        Scenario:
+        - One idle online runner is draining for disk cleanup and holds `pr`.
+        - Fleet is busy and `pr` and `bors` jobs are pending.
+
+        Expected behavior:
+        - No label is added to or removed from the draining runner.
+        """
+        payload = _payload(
+            [
+                _runner(
+                    1001,
+                    "hoskinson1",
+                    busy=False,
+                    custom_labels=["ephemeral", "cleanup-soon", "pr"],
+                ),
+            ]
+        )
+        api = _FakeRunnerLabelApi()
+        manager = RunnerLabelManager(payload=payload, api=api)
+
+        result = manager.apply_policy(pending_jobs=_pending("bors"), fleet_busy=True)
+
+        self.assertEqual(api.add_calls, [])
+        self.assertEqual(api.remove_calls, [])
         self.assertEqual(result.label_errors, "")
 
     def test_only_unmonitored_runners_reports_error(self) -> None:
-        """A payload with only unmonitored runners should report a label error.
-
-        Scenario:
-        - The payload contains runners, but none match the hoskinson scheme.
-
-        Expected behavior:
-        - No mutations occur and an error is reported.
-        """
+        """A payload with only unmonitored runners should report a label error."""
         payload = _payload(
             [
-                _runner(601, "experimental-a", status="online", busy=False, custom_labels=[]),
+                _runner(901, "experimental-a", busy=False, custom_labels=[]),
             ]
         )
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=payload, api=api)
 
-        result = manager.apply_policy(pr_jobs_pending=False)
+        result = manager.apply_policy(pending_jobs=_pending(), fleet_busy=False)
 
         self.assertEqual(api.add_calls, [])
         self.assertEqual(api.remove_calls, [])
         self.assertIn("No monitored runners found", result.label_errors)
 
-    def test_no_pending_pr_jobs_leaves_pr_labels_unchanged(self) -> None:
-        """Without pending `pr` jobs, missing `pr` labels must stay missing.
 
-        Scenario:
-        - pr_jobs_pending is false
-        - Two idle runners have `bors` but lack `pr` (the smaller pr pool).
+class RenderPendingLabelsTests(unittest.TestCase):
+    """Unit tests for pending-labels output rendering."""
 
-        Expected behavior:
-        - No `pr` label is added or removed.
-        - Summary records that `pr` labels were left unchanged.
-        """
-        payload = _payload(
-            [
-                _runner(701, "hoskinson1", status="online", busy=False, custom_labels=["bors"]),
-                _runner(702, "hoskinson2", status="online", busy=False, custom_labels=["bors"]),
-                _runner(703, "hoskinson3", status="online", busy=False, custom_labels=["bors", "pr"]),
-            ]
+    def test_render_variants(self) -> None:
+        self.assertEqual(render_pending_labels(_pending()), "none")
+        self.assertEqual(render_pending_labels(_pending("pr")), "pr")
+        self.assertEqual(render_pending_labels(_pending("pr", "bors")), "bors,pr")
+        self.assertEqual(render_pending_labels(_pending(check_failed=True)), "unknown")
+        self.assertEqual(
+            render_pending_labels(_pending("pr", check_failed=True)),
+            "pr (check incomplete)",
         )
-        api = _FakeRunnerLabelApi()
-        manager = RunnerLabelManager(payload=payload, api=api)
-
-        result = manager.apply_policy(pr_jobs_pending=False)
-
-        self.assertEqual(api.add_calls, [])
-        self.assertEqual(api.remove_calls, [])
-        self.assertIn("No pending `pr` jobs", result.label_summary)
-        self.assertEqual(result.label_errors, "")
-
-    def test_unknown_pending_pr_jobs_reports_error_and_changes_nothing(self) -> None:
-        """A failed pending-jobs check must not mutate `pr` labels.
-
-        Scenario:
-        - pr_jobs_pending is None (check failed)
-        - One idle runner has `bors` but lacks `pr`.
-
-        Expected behavior:
-        - No `pr` label mutation occurs.
-        - An error line reports the failed check.
-        """
-        payload = _payload(
-            [
-                _runner(801, "hoskinson1", status="online", busy=False, custom_labels=["bors"]),
-            ]
-        )
-        api = _FakeRunnerLabelApi()
-        manager = RunnerLabelManager(payload=payload, api=api)
-
-        result = manager.apply_policy(pr_jobs_pending=None)
-
-        self.assertEqual(api.add_calls, [])
-        self.assertEqual(api.remove_calls, [])
-        self.assertIn("could not determine pending `pr` jobs", result.label_errors)
-
-    def test_pending_pr_jobs_keep_one_runner_reserved(self) -> None:
-        """Pending `pr` jobs must not take the runner reserved for bors.
-
-        Scenario:
-        - pr_jobs_pending is true
-        - Two idle runners have `bors` but lack `pr`; one idle runner has both.
-
-        Expected behavior:
-        - The first idle runner without `pr` stays reserved (no add).
-        - The other runner missing `pr` receives it.
-        - No `pr` label is removed.
-        """
-        payload = _payload(
-            [
-                _runner(901, "hoskinson1", status="online", busy=False, custom_labels=["bors"]),
-                _runner(902, "hoskinson2", status="online", busy=False, custom_labels=["bors"]),
-                _runner(903, "hoskinson3", status="online", busy=False, custom_labels=["bors", "pr"]),
-            ]
-        )
-        api = _FakeRunnerLabelApi()
-        manager = RunnerLabelManager(payload=payload, api=api)
-
-        result = manager.apply_policy(pr_jobs_pending=True)
-
-        self.assertEqual(api.add_calls, [(902, "pr")])
-        self.assertEqual(api.remove_calls, [])
-        self.assertIn("reserved for bors", result.label_summary)
-        self.assertEqual(result.label_errors, "")
-
-    def test_pending_pr_jobs_with_full_pool_only_frees_one_runner(self) -> None:
-        """With every idle runner labeled `pr`, the reservation still frees one.
-
-        Scenario:
-        - pr_jobs_pending is true
-        - Both idle runners have `bors` and `pr`.
-
-        Expected behavior:
-        - `pr` is removed from the first idle runner (bors reservation).
-        - No `pr` label is added; the freed runner stays reserved.
-        """
-        payload = _payload(
-            [
-                _runner(951, "hoskinson1", status="online", busy=False, custom_labels=["bors", "pr"]),
-                _runner(952, "hoskinson2", status="online", busy=False, custom_labels=["bors", "pr"]),
-            ]
-        )
-        api = _FakeRunnerLabelApi()
-        manager = RunnerLabelManager(payload=payload, api=api)
-
-        result = manager.apply_policy(pr_jobs_pending=True)
-
-        self.assertEqual(api.remove_calls, [(951, "pr")])
-        self.assertEqual(api.add_calls, [])
-        self.assertEqual(result.label_errors, "")
 
 
 def _runs_url(repo: str, status: str) -> str:
-    """Build the workflow-runs listing URL used by PendingPrJobsClient."""
+    """Build the workflow-runs listing URL used by PendingLabeledJobsClient."""
     return (
         f"https://api.github.com/repos/test-org/{repo}/actions/runs"
         f"?status={status}&per_page=20"
@@ -412,7 +375,7 @@ def _runs_url(repo: str, status: str) -> str:
 
 
 def _jobs_url(repo: str, run_id: int) -> str:
-    """Build the run-jobs URL used by PendingPrJobsClient."""
+    """Build the run-jobs URL used by PendingLabeledJobsClient."""
     return (
         f"https://api.github.com/repos/test-org/{repo}/actions/runs/{run_id}/jobs"
         f"?filter=latest&per_page=100"
@@ -431,14 +394,14 @@ def _fake_urlopen_for(responses: dict[str, dict]):
     return fake_urlopen
 
 
-class PendingPrJobsClientTests(unittest.TestCase):
-    """Unit tests for queued `pr` job detection."""
+class PendingLabeledJobsClientTests(unittest.TestCase):
+    """Unit tests for queued standby-label job detection."""
 
-    def _client(self) -> PendingPrJobsClient:
-        return PendingPrJobsClient(org="test-org", token="token", repos=("repo-a",))
+    def _client(self) -> PendingLabeledJobsClient:
+        return PendingLabeledJobsClient(org="test-org", token="token", repos=("repo-a",))
 
-    def test_queued_run_with_queued_pr_job_returns_true(self) -> None:
-        """A queued run holding a queued `pr` job should report pending jobs."""
+    def test_queued_run_with_queued_pr_job_reports_pr_pending(self) -> None:
+        """A queued run holding a queued `pr` job should report `pr` pending."""
         responses = {
             _runs_url("repo-a", "queued"): {"workflow_runs": [{"id": 11}]},
             _runs_url("repo-a", "in_progress"): {"workflow_runs": []},
@@ -453,27 +416,31 @@ class PendingPrJobsClientTests(unittest.TestCase):
             "monitor_runners.label_management.urllib.request.urlopen",
             side_effect=_fake_urlopen_for(responses),
         ):
-            self.assertTrue(self._client().has_pending_pr_jobs())
+            result = self._client().pending_labels()
+        self.assertEqual(result.pending, frozenset({"pr"}))
+        self.assertFalse(result.check_failed)
 
-    def test_in_progress_run_with_queued_pr_job_returns_true(self) -> None:
-        """A queued `pr` job inside an in-progress run should also count."""
+    def test_multiple_standby_labels_are_collected_across_runs(self) -> None:
+        """`pr` and `bors` jobs in different runs should both be reported."""
         responses = {
-            _runs_url("repo-a", "queued"): {"workflow_runs": []},
+            _runs_url("repo-a", "queued"): {"workflow_runs": [{"id": 21}]},
             _runs_url("repo-a", "in_progress"): {"workflow_runs": [{"id": 22}]},
+            _jobs_url("repo-a", 21): {
+                "jobs": [{"status": "queued", "labels": ["bors"]}]
+            },
             _jobs_url("repo-a", 22): {
-                "jobs": [
-                    {"status": "in_progress", "labels": ["ubuntu-latest"]},
-                    {"status": "queued", "labels": ["pr"]},
-                ]
+                "jobs": [{"status": "queued", "labels": ["pr"]}]
             },
         }
         with patch(
             "monitor_runners.label_management.urllib.request.urlopen",
             side_effect=_fake_urlopen_for(responses),
         ):
-            self.assertTrue(self._client().has_pending_pr_jobs())
+            result = self._client().pending_labels()
+        self.assertEqual(result.pending, frozenset({"pr", "bors"}))
+        self.assertFalse(result.check_failed)
 
-    def test_no_queued_pr_jobs_returns_false(self) -> None:
+    def test_no_queued_standby_jobs_reports_empty(self) -> None:
         """Runs whose jobs run elsewhere or already started should not count."""
         responses = {
             _runs_url("repo-a", "queued"): {"workflow_runs": [{"id": 33}]},
@@ -489,18 +456,22 @@ class PendingPrJobsClientTests(unittest.TestCase):
             "monitor_runners.label_management.urllib.request.urlopen",
             side_effect=_fake_urlopen_for(responses),
         ):
-            self.assertIs(self._client().has_pending_pr_jobs(), False)
+            result = self._client().pending_labels()
+        self.assertEqual(result.pending, frozenset())
+        self.assertFalse(result.check_failed)
 
-    def test_listing_failure_returns_none(self) -> None:
-        """Network failure on every request should report an unknown result."""
+    def test_listing_failure_reports_incomplete_check(self) -> None:
+        """Network failure on every request should mark the check incomplete."""
         with patch(
             "monitor_runners.label_management.urllib.request.urlopen",
             side_effect=urllib.error.URLError("network down"),
         ):
-            self.assertIsNone(self._client().has_pending_pr_jobs())
+            result = self._client().pending_labels()
+        self.assertEqual(result.pending, frozenset())
+        self.assertTrue(result.check_failed)
 
-    def test_jobs_failure_without_findings_returns_none(self) -> None:
-        """A failed jobs lookup must not turn into a confident `false`."""
+    def test_jobs_failure_without_findings_reports_incomplete_check(self) -> None:
+        """A failed jobs lookup must not turn into a confident empty result."""
         responses = {
             _runs_url("repo-a", "queued"): {"workflow_runs": [{"id": 44}]},
             _runs_url("repo-a", "in_progress"): {"workflow_runs": []},
@@ -509,7 +480,26 @@ class PendingPrJobsClientTests(unittest.TestCase):
             "monitor_runners.label_management.urllib.request.urlopen",
             side_effect=_fake_urlopen_for(responses),
         ):
-            self.assertIsNone(self._client().has_pending_pr_jobs())
+            result = self._client().pending_labels()
+        self.assertEqual(result.pending, frozenset())
+        self.assertTrue(result.check_failed)
+
+    def test_jobs_failure_with_findings_keeps_found_labels(self) -> None:
+        """Labels already found stay pending even when another lookup fails."""
+        responses = {
+            _runs_url("repo-a", "queued"): {"workflow_runs": [{"id": 55}, {"id": 56}]},
+            _runs_url("repo-a", "in_progress"): {"workflow_runs": []},
+            _jobs_url("repo-a", 55): {
+                "jobs": [{"status": "queued", "labels": ["pr"]}]
+            },
+        }
+        with patch(
+            "monitor_runners.label_management.urllib.request.urlopen",
+            side_effect=_fake_urlopen_for(responses),
+        ):
+            result = self._client().pending_labels()
+        self.assertEqual(result.pending, frozenset({"pr"}))
+        self.assertTrue(result.check_failed)
 
 
 if __name__ == "__main__":

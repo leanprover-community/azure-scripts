@@ -11,8 +11,21 @@ import urllib.request
 from .constants import host_for_name
 from .models import GitHubRunner, GitHubRunnersPayload
 
-# Repos whose CI queues jobs on runners with the `pr` label.
-PR_JOBS_REPOS = ("mathlib4", "mathlib4-nightly-testing")
+# Repos whose CI queues jobs on runners with the standby labels.
+LABELED_JOBS_REPOS = ("mathlib4", "mathlib4-nightly-testing")
+
+# Labels the standby mechanism may add to idle hoskinson runners.
+STANDBY_LABELS = ("pr", "bors")
+
+# Labels the standby mechanism strips from idle hoskinson runners. Includes
+# the specialty labels so runners registered under the old per-host label
+# tables are cleaned up as well.
+ROUTING_LABELS = ("pr", "bors", "doc-gen", "lean4checker")
+
+# Runners carrying this label are being drained for disk cleanup
+# (leanprover-community/docker, host-management/auto-cleanup.sh) and must not
+# be relabeled.
+CLEANUP_LABEL = "cleanup-soon"
 
 # Upper bound on per-run job lookups per cycle; existence checks short-circuit,
 # so this only matters when nothing is pending.
@@ -23,17 +36,38 @@ MAX_RUNS_TO_INSPECT = 20
 class LabelManagementResult:
     """Label-management outputs written to GITHUB_OUTPUT."""
 
-    pr_jobs_pending: bool | None
+    pending_labels: str
+    fleet_busy: bool
     label_summary: str
     label_errors: str
 
 
-class PendingPrJobsClient:
-    """Checks org repos for queued workflow jobs that request the `pr` label."""
+@dataclass
+class PendingLabeledJobs:
+    """Which standby labels have queued jobs, and whether the check was complete.
 
-    def __init__(self, org: str, token: str, repos: tuple[str, ...] = PR_JOBS_REPOS) -> None:
+    Labels in `pending` are definitely requested by some queued job, even when
+    `check_failed` is true. A failed check only makes *absence* uncertain: a
+    label missing from `pending` may still have queued jobs.
+    """
+
+    pending: frozenset[str]
+    check_failed: bool
+
+
+class PendingLabeledJobsClient:
+    """Checks org repos for queued workflow jobs that request standby labels."""
+
+    def __init__(
+        self,
+        org: str,
+        token: str,
+        labels: tuple[str, ...] = STANDBY_LABELS,
+        repos: tuple[str, ...] = LABELED_JOBS_REPOS,
+    ) -> None:
         self.org = org
         self.token = token
+        self.labels = labels
         self.repos = repos
 
     def _get_json(self, url: str) -> dict | None:
@@ -54,14 +88,16 @@ class PendingPrJobsClient:
             return None
         return payload
 
-    def has_pending_pr_jobs(self) -> bool | None:
-        """Return true when some queued job requests `pr`; None when the check fails.
+    def pending_labels(self) -> PendingLabeledJobs:
+        """Return the standby labels requested by queued jobs.
 
         A workflow run can sit in `queued` or hold queued jobs while
         `in_progress` (e.g. a matrix job waiting for a runner), so both run
         states are inspected. Queued runs are inspected first: they are the
         strongest starvation signal.
         """
+        wanted = set(self.labels)
+        pending: set[str] = set()
         check_failed = False
         run_refs: list[tuple[str, int]] = []
         for status in ("queued", "in_progress"):
@@ -82,10 +118,12 @@ class PendingPrJobsClient:
 
         if len(run_refs) > MAX_RUNS_TO_INSPECT:
             skipped = len(run_refs) - MAX_RUNS_TO_INSPECT
-            print(f"INFO: pending-pr-jobs check inspecting {MAX_RUNS_TO_INSPECT} runs, skipping {skipped}")
+            print(f"INFO: pending-jobs check inspecting {MAX_RUNS_TO_INSPECT} runs, skipping {skipped}")
             run_refs = run_refs[:MAX_RUNS_TO_INSPECT]
 
         for repo, run_id in run_refs:
+            if pending == wanted:
+                break
             url = (
                 f"https://api.github.com/repos/{self.org}/{repo}/actions/runs/{run_id}/jobs"
                 f"?filter=latest&per_page=100"
@@ -99,12 +137,32 @@ class PendingPrJobsClient:
                 if not isinstance(job, dict):
                     continue
                 labels = job.get("labels")
-                if job.get("status") == "queued" and isinstance(labels, list) and "pr" in labels:
-                    return True
+                if job.get("status") == "queued" and isinstance(labels, list):
+                    pending.update(wanted.intersection(labels))
 
-        if check_failed:
-            return None
-        return False
+        return PendingLabeledJobs(pending=frozenset(pending), check_failed=check_failed)
+
+
+def render_pending_labels(pending_jobs: PendingLabeledJobs) -> str:
+    """Render the pending-labels result for outputs and logs."""
+    labels = ",".join(sorted(pending_jobs.pending))
+    if pending_jobs.check_failed:
+        return f"{labels} (check incomplete)" if labels else "unknown"
+    return labels or "none"
+
+
+def fleet_is_busy(payload: GitHubRunnersPayload) -> bool:
+    """Return true when every online non-hoskinson runner is busy.
+
+    Vacuously true when no non-hoskinson runner is online: with no other
+    capacity available, the hoskinson standby pool may take jobs.
+    """
+    for runner in payload.runners:
+        if host_for_name(runner.name) is not None:
+            continue
+        if runner.status == "online" and not runner.busy:
+            return False
+    return True
 
 
 class RunnerLabelApi:
@@ -161,43 +219,42 @@ class RunnerLabelApi:
 
 
 class RunnerLabelManager:
-    """Applies bors/pr label policy to one runner snapshot.
+    """Applies the standby label policy to one runner snapshot.
+
+    The hoskinson hosts are standby capacity: their ephemeral runners register
+    without routing labels and take jobs only when this policy hands out a
+    label. The non-hoskinson fleet serves all queues by default.
 
     State machine
     -------------
     [Start]
        |
        v
-    [Phase 1] Ensure all idle runners have `bors`
+    Compute `active` labels: a standby label is active when the whole
+    non-hoskinson fleet is busy AND some queued job requests it.
        |
        v
-    [Phase 2] Ensure at least one idle runner lacks `pr`, so a runner is
-       always available when a bors batch starts
-       - if already true: no mutation
-       - else remove `pr` from first idle runner with `pr`
-       - if no idle runner exists: log and continue
+    [Phase 1] Add each active label to every idle online hoskinson runner
+       that lacks it, so the starved queue gets standby capacity.
        |
        v
-    [Phase 3] Depending on `pr_jobs_pending`
-       |
-       +--> if TRUE: add `pr` to each idle runner that:
-       |        - has `bors` label
-       |        - lacks `pr` label
-       |        - is not the runner reserved in Phase 2
-       |
-       +--> if FALSE: leave `pr` labels unchanged; each host's own label
-       |    table stays the baseline (the smaller pr pool stands)
-       |
-       +--> if None (check failed): same as FALSE, plus one error line
+    [Phase 2] Remove every non-active routing label from every idle
+       hoskinson runner, returning the standby pool to its unlabeled
+       baseline. Offline idle runners are stripped too.
+
+    When the pending-jobs check is incomplete, labels found pending are still
+    added (Phase 1); Phase 2 is skipped entirely, because a label missing from
+    the pending set may still have queued jobs.
 
     Notes
     -----
     - Snapshot-based: no internal cross-run state.
-    - Busy runners are never mutated by this state machine. This is because runners are ephemeral and label changes won't matter in this case.
+    - Busy runners are never mutated. Runners are ephemeral: a busy runner
+      deregisters after its job and its replacement registers unlabeled.
+    - Runners carrying the `cleanup-soon` drain label are never mutated.
     - Best-effort mutations: collect errors and continue.
-    - Only runners on monitored (hoskinson*) hosts are managed; any other
-      runner in the payload is ignored entirely, so experimental runners are
-      never relabeled.
+    - Only runners on monitored (hoskinson*) hosts are mutated; any other
+      runner in the payload only feeds the fleet-busy signal.
     """
 
     def __init__(self, payload: GitHubRunnersPayload, api: RunnerLabelApi) -> None:
@@ -205,12 +262,6 @@ class RunnerLabelManager:
         self.runners = [
             runner for runner in payload.runners if host_for_name(runner.name) is not None
         ]
-        ignored = sorted(
-            runner.name for runner in payload.runners if host_for_name(runner.name) is None
-        )
-        if ignored:
-            ignored_list = ", ".join(f"`{name}`" for name in ignored)
-            print(f"INFO: ignoring unmonitored runner(s) for label management: {ignored_list}")
         self._summary_lines: list[str] = []
         self._error_lines: list[str] = []
 
@@ -248,91 +299,74 @@ class RunnerLabelManager:
             return
         self._add_error(f"Failed to remove `{label}` label from runner `{runner.name}`")
 
-    def _ensure_bors_labels(self) -> None:
-        """Ensure every idle runner includes the `bors` custom label."""
-        for runner in self.runners:
-            if runner.busy:
+    def _is_draining(self, runner: GitHubRunner) -> bool:
+        """Return true when runner carries the cleanup drain label."""
+        return CLEANUP_LABEL in self._custom_labels(runner)
+
+    def _add_active_labels(self, active: set[str]) -> None:
+        """Add each active label to idle online runners that lack it."""
+        for label in STANDBY_LABELS:
+            if label not in active:
                 continue
-            if "bors" not in self._custom_labels(runner):
-                self._add_label(runner, "bors")
+            for runner in self.runners:
+                if not self._is_idle(runner) or runner.status != "online":
+                    continue
+                if self._is_draining(runner):
+                    continue
+                if label not in self._custom_labels(runner):
+                    self._add_label(runner, label)
 
-    def _select_idle_runner_for_pr_removal(self) -> GitHubRunner | None:
-        """Pick first idle runner that currently has custom label `pr`."""
+    def _remove_inactive_labels(self, active: set[str]) -> None:
+        """Strip non-active routing labels from idle runners."""
         for runner in self.runners:
-            if self._is_idle(runner) and "pr" in self._custom_labels(runner):
-                return runner
-        return None
-
-    def _first_idle_runner_without_pr(self) -> GitHubRunner | None:
-        """Return the first idle runner lacking `pr`: the reserved bors runner."""
-        for runner in self.runners:
-            if self._is_idle(runner) and "pr" not in self._custom_labels(runner):
-                return runner
-        return None
-
-    def _ensure_reserved_bors_runner(self) -> None:
-        """Keep at least one idle runner without `pr` so bors batches always start."""
-        reserved = self._first_idle_runner_without_pr()
-        if reserved is not None:
-            self._add_summary(
-                f"Runner `{reserved.name}` already lacks `pr` label (reserved for bors)"
-            )
-            return
-
-        selected_runner = self._select_idle_runner_for_pr_removal()
-        if selected_runner is None:
-            print("INFO: No idle runners available to remove `pr` label from")
-            return
-        self._remove_label(selected_runner, "pr")
-
-    def _add_pr_labels_for_pending_jobs(self) -> None:
-        """Add missing `pr` to idle runners with `bors` so pending jobs get picked up.
-
-        The reserved bors runner keeps lacking `pr`. When the reservation
-        removed `pr` instead, the snapshot still shows that runner with `pr`,
-        so it is not a candidate either way.
-        """
-        reserved = self._first_idle_runner_without_pr()
-        candidates: list[GitHubRunner] = []
-        for runner in self.runners:
+            if not self._is_idle(runner) or self._is_draining(runner):
+                continue
             custom_labels = self._custom_labels(runner)
-            if runner.busy or runner is reserved:
-                continue
-            if "bors" in custom_labels and "pr" not in custom_labels:
-                candidates.append(runner)
+            for label in ROUTING_LABELS:
+                if label in custom_labels and label not in active:
+                    self._remove_label(runner, label)
 
-        if not candidates:
-            self._add_summary("Pending `pr` jobs; no `pr` labels to add")
-            return
-
-        for runner in candidates:
-            self._add_label(runner, "pr")
-
-    def apply_policy(self, pr_jobs_pending: bool | None) -> LabelManagementResult:
-        """Execute label-management policy and return summarized outputs."""
+    def apply_policy(
+        self, pending_jobs: PendingLabeledJobs, fleet_busy: bool
+    ) -> LabelManagementResult:
+        """Execute the standby label policy and return summarized outputs."""
+        pending_text = render_pending_labels(pending_jobs)
         if not self.runners:
             self._add_error("**Label Management Error:** No monitored runners found in organization")
             return LabelManagementResult(
-                pr_jobs_pending=pr_jobs_pending,
+                pending_labels=pending_text,
+                fleet_busy=fleet_busy,
                 label_summary="\n".join(self._summary_lines),
                 label_errors="\n".join(self._error_lines),
             )
 
-        # Keep `bors` present on idle runners before evaluating `pr` balancing.
-        self._ensure_bors_labels()
-        self._ensure_reserved_bors_runner()
-        if pr_jobs_pending:
-            self._add_pr_labels_for_pending_jobs()
-        elif pr_jobs_pending is None:
+        if fleet_busy:
+            active = set(STANDBY_LABELS).intersection(pending_jobs.pending)
+        else:
+            active = set()
+
+        if active:
+            active_text = ", ".join(f"`{label}`" for label in sorted(active))
+            self._add_summary(
+                f"Fleet busy with pending jobs; standby labels active: {active_text}"
+            )
+        elif fleet_busy:
+            self._add_summary("Fleet busy but no pending standby jobs; standby stays unlabeled")
+        else:
+            self._add_summary("Idle fleet capacity available; standby stays unlabeled")
+
+        self._add_active_labels(active)
+        if pending_jobs.check_failed:
             self._add_error(
-                "**Label Management Error:** could not determine pending `pr` jobs; "
-                "left `pr` labels unchanged"
+                "**Label Management Error:** pending-jobs check incomplete; "
+                "left non-active labels in place"
             )
         else:
-            self._add_summary("No pending `pr` jobs; left `pr` labels unchanged")
+            self._remove_inactive_labels(active)
 
         return LabelManagementResult(
-            pr_jobs_pending=pr_jobs_pending,
+            pending_labels=pending_text,
+            fleet_busy=fleet_busy,
             label_summary="\n".join(self._summary_lines),
             label_errors="\n".join(self._error_lines),
         )
@@ -343,22 +377,23 @@ def execute_label_management(
     org: str,
     token: str,
     dry_run: bool,
-    pr_jobs_repos: tuple[str, ...] = PR_JOBS_REPOS,
+    labeled_jobs_repos: tuple[str, ...] = LABELED_JOBS_REPOS,
 ) -> LabelManagementResult:
-    """Run queue-aware label management for one runners payload."""
-    pr_jobs_pending = PendingPrJobsClient(
-        org=org, token=token, repos=pr_jobs_repos
-    ).has_pending_pr_jobs()
+    """Run queue-aware standby label management for one runners payload."""
+    pending_jobs = PendingLabeledJobsClient(
+        org=org, token=token, repos=labeled_jobs_repos
+    ).pending_labels()
     api = RunnerLabelApi(org=org, token=token, dry_run=dry_run)
     manager = RunnerLabelManager(payload=payload, api=api)
-    result = manager.apply_policy(pr_jobs_pending=pr_jobs_pending)
+    result = manager.apply_policy(pending_jobs=pending_jobs, fleet_busy=fleet_is_busy(payload))
     if dry_run:
         if result.label_summary:
             label_summary = f"Dry-run summary (these actions were not taken):\n{result.label_summary}"
         else:
             label_summary = "Dry-run"
         return LabelManagementResult(
-            pr_jobs_pending=result.pr_jobs_pending,
+            pending_labels=result.pending_labels,
+            fleet_busy=result.fleet_busy,
             label_summary=label_summary,
             label_errors=result.label_errors,
         )
