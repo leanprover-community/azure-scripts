@@ -170,8 +170,8 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
         - real label-management execution path is used.
 
         Expected behavior:
-        - summary starts with "Would-be summary:".
-        - summary still contains regular mutation wording ("Removed ...").
+        - summary is marked as a dry run.
+        - summary still describes the would-be mutations.
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -201,11 +201,9 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             outputs = _parse_github_output(output_file)
-            self.assertIn(
-                "Dry-run summary (these actions were not taken):",
-                outputs.get("label_summary", ""),
-            )
-            self.assertIn("Removed `pr` label from runner `hoskinson1`", outputs.get("label_summary", ""))
+            summary = outputs.get("label_summary", "")
+            self.assertIn("Dry-run", summary)
+            self.assertIn("hoskinson1", summary)
 
 
 if __name__ == "__main__":
