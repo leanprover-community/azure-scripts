@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 from .core import process_monitoring_run
 from .constants import host_for_name
 from .label_management import (
-    PR_JOBS_REPOS,
+    LABELED_JOBS_REPOS,
     LabelManagementResult,
     execute_label_management,
 )
@@ -117,18 +117,10 @@ def _write_processing_error_outputs(output_path: str, messages: list[str]) -> No
         _write_output_multiline(output_path, "processing_errors", "")
 
 
-def _pr_jobs_pending_text(pr_jobs_pending: Optional[bool]) -> str:
-    """Render the tri-state pending-jobs value for outputs and logs."""
-    if pr_jobs_pending is None:
-        return "unknown"
-    return str(pr_jobs_pending).lower()
-
-
 def _write_label_management_outputs(output_path: str, result: LabelManagementResult) -> None:
     """Write label-management outputs consumed by workflow notification steps."""
-    _write_output_line(
-        output_path, "pr_jobs_pending", _pr_jobs_pending_text(result.pr_jobs_pending)
-    )
+    _write_output_line(output_path, "pending_labels", result.pending_labels)
+    _write_output_line(output_path, "fleet_busy", str(result.fleet_busy).lower())
     _write_output_multiline(output_path, "label_summary", result.label_summary)
     if result.label_errors:
         _write_output_multiline(output_path, "label_errors", result.label_errors)
@@ -242,8 +234,8 @@ def _run_manage_labels(args: argparse.Namespace) -> int:
     if dry_run:
         print("DRY RUN: skipping runner label mutations (non-master branch)")
 
-    pr_jobs_repos = tuple(
-        repo.strip() for repo in args.pr_jobs_repos.split(",") if repo.strip()
+    labeled_jobs_repos = tuple(
+        repo.strip() for repo in args.labeled_jobs_repos.split(",") if repo.strip()
     )
     payload = GitHubRunnersPayload.from_dict(_load_json_file(args.response_file))
     result = execute_label_management(
@@ -251,9 +243,10 @@ def _run_manage_labels(args: argparse.Namespace) -> int:
         org=args.org,
         token=args.token,
         dry_run=dry_run,
-        pr_jobs_repos=pr_jobs_repos,
+        labeled_jobs_repos=labeled_jobs_repos,
     )
-    print(f"Pending pr jobs: {_pr_jobs_pending_text(result.pr_jobs_pending)}")
+    print(f"Pending standby labels: {result.pending_labels}")
+    print(f"Fleet busy: {str(result.fleet_busy).lower()}")
     _write_label_management_outputs(args.github_output, result)
 
     # Keep behavior aligned with the old shell step cleanup.
@@ -289,7 +282,7 @@ def _build_parser() -> argparse.ArgumentParser:
     manage.add_argument("--org", required=True)
     manage.add_argument("--response-file", default="runners_response.json")
     manage.add_argument("--dry-run", default="false")
-    manage.add_argument("--pr-jobs-repos", default=",".join(PR_JOBS_REPOS))
+    manage.add_argument("--labeled-jobs-repos", default=",".join(LABELED_JOBS_REPOS))
     manage.add_argument(
         "--github-output", default=os.environ.get("GITHUB_OUTPUT", "")
     )

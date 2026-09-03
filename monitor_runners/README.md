@@ -6,7 +6,7 @@ Python package for self-hosted runner monitoring and weekly reporting.
 
 - `core.py`: runner state machine, transition detection, alert planning, and orchestration.
 - `models.py`: typed data models/enums for GitHub payloads, state, and stats.
-- `label_management.py`: queue-aware runner label policy (keeps one idle runner reserved for bors) and GitHub label mutation client.
+- `label_management.py`: standby runner label policy (labels idle hoskinson runners only when the non-hoskinson fleet is busy and jobs are queued behind a label) and GitHub label mutation client.
 - `reporting.py`: weekly markdown report generation from stats.
 - `workflow.py`: GitHub Actions CLI entrypoints:
   - `check-runners`
