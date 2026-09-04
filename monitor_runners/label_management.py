@@ -37,7 +37,7 @@ class LabelManagementResult:
     """Label-management outputs written to GITHUB_OUTPUT."""
 
     pending_labels: str
-    fleet_busy: bool
+    busy_labels: str
     label_summary: str
     label_errors: str
 
@@ -151,18 +151,32 @@ def render_pending_labels(pending_jobs: PendingLabeledJobs) -> str:
     return labels or "none"
 
 
-def fleet_is_busy(payload: GitHubRunnersPayload) -> bool:
-    """Return true when every online non-hoskinson runner is busy.
+def busy_fleet_labels(
+    payload: GitHubRunnersPayload, labels: tuple[str, ...] = STANDBY_LABELS
+) -> frozenset[str]:
+    """Return the labels whose non-hoskinson capacity is fully busy.
 
-    Vacuously true when no non-hoskinson runner is online: with no other
-    capacity available, the hoskinson standby pool may take jobs.
+    A label is busy when every online non-hoskinson runner that carries it is
+    busy. The signal is per label, so a starved `pr` queue can call in standby
+    capacity while idle `bors` runners keep the `bors` queue served.
+
+    A label is also busy when no online non-hoskinson runner carries it: no
+    other capacity serves that label, so the hoskinson standby pool may take
+    its jobs.
     """
+    busy = set(labels)
     for runner in payload.runners:
         if host_for_name(runner.name) is not None:
             continue
-        if runner.status == "online" and not runner.busy:
-            return False
-    return True
+        if runner.status != "online" or runner.busy:
+            continue
+        busy.difference_update(runner.label_names())
+    return frozenset(busy)
+
+
+def render_busy_labels(busy_labels: frozenset[str]) -> str:
+    """Render the busy-labels result for outputs and logs."""
+    return ",".join(sorted(busy_labels)) or "none"
 
 
 class RunnerLabelApi:
@@ -230,8 +244,9 @@ class RunnerLabelManager:
     [Start]
        |
        v
-    Compute `active` labels: a standby label is active when the whole
-    non-hoskinson fleet is busy AND some queued job requests it.
+    Compute `active` labels: a standby label is active when every online
+    non-hoskinson runner carrying that label is busy AND some queued job
+    requests it.
        |
        v
     [Phase 1] Add each active label to every idle online hoskinson runner
@@ -254,7 +269,7 @@ class RunnerLabelManager:
     - Runners carrying the `cleanup-soon` drain label are never mutated.
     - Best-effort mutations: collect errors and continue.
     - Only runners on monitored (hoskinson*) hosts are mutated; any other
-      runner in the payload only feeds the fleet-busy signal.
+      runner in the payload only feeds the per-label busy signal.
     """
 
     def __init__(self, payload: GitHubRunnersPayload, api: RunnerLabelApi) -> None:
@@ -327,33 +342,28 @@ class RunnerLabelManager:
                     self._remove_label(runner, label)
 
     def apply_policy(
-        self, pending_jobs: PendingLabeledJobs, fleet_busy: bool
+        self, pending_jobs: PendingLabeledJobs, busy_labels: frozenset[str]
     ) -> LabelManagementResult:
         """Execute the standby label policy and return summarized outputs."""
         pending_text = render_pending_labels(pending_jobs)
+        busy_text = render_busy_labels(busy_labels)
         if not self.runners:
             self._add_error("**Label Management Error:** No monitored runners found in organization")
             return LabelManagementResult(
                 pending_labels=pending_text,
-                fleet_busy=fleet_busy,
+                busy_labels=busy_text,
                 label_summary="\n".join(self._summary_lines),
                 label_errors="\n".join(self._error_lines),
             )
 
-        if fleet_busy:
-            active = set(STANDBY_LABELS).intersection(pending_jobs.pending)
-        else:
-            active = set()
+        active = set(STANDBY_LABELS).intersection(pending_jobs.pending, busy_labels)
 
+        self._add_summary(f"Busy fleet labels: {busy_text}; queued labels: {pending_text}")
         if active:
             active_text = ", ".join(f"`{label}`" for label in sorted(active))
-            self._add_summary(
-                f"Fleet busy with pending jobs; standby labels active: {active_text}"
-            )
-        elif fleet_busy:
-            self._add_summary("Fleet busy but no pending standby jobs; standby stays unlabeled")
+            self._add_summary(f"Standby labels active: {active_text}")
         else:
-            self._add_summary("Idle fleet capacity available; standby stays unlabeled")
+            self._add_summary("No starved standby label; standby stays unlabeled")
 
         self._add_active_labels(active)
         if pending_jobs.check_failed:
@@ -366,7 +376,7 @@ class RunnerLabelManager:
 
         return LabelManagementResult(
             pending_labels=pending_text,
-            fleet_busy=fleet_busy,
+            busy_labels=busy_text,
             label_summary="\n".join(self._summary_lines),
             label_errors="\n".join(self._error_lines),
         )
@@ -385,7 +395,9 @@ def execute_label_management(
     ).pending_labels()
     api = RunnerLabelApi(org=org, token=token, dry_run=dry_run)
     manager = RunnerLabelManager(payload=payload, api=api)
-    result = manager.apply_policy(pending_jobs=pending_jobs, fleet_busy=fleet_is_busy(payload))
+    result = manager.apply_policy(
+        pending_jobs=pending_jobs, busy_labels=busy_fleet_labels(payload)
+    )
     if dry_run:
         if result.label_summary:
             label_summary = f"Dry-run summary (these actions were not taken):\n{result.label_summary}"
@@ -393,7 +405,7 @@ def execute_label_management(
             label_summary = "Dry-run"
         return LabelManagementResult(
             pending_labels=result.pending_labels,
-            fleet_busy=result.fleet_busy,
+            busy_labels=result.busy_labels,
             label_summary=label_summary,
             label_errors=result.label_errors,
         )

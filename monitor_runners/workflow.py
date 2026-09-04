@@ -120,7 +120,7 @@ def _write_processing_error_outputs(output_path: str, messages: list[str]) -> No
 def _write_label_management_outputs(output_path: str, result: LabelManagementResult) -> None:
     """Write label-management outputs consumed by workflow notification steps."""
     _write_output_line(output_path, "pending_labels", result.pending_labels)
-    _write_output_line(output_path, "fleet_busy", str(result.fleet_busy).lower())
+    _write_output_line(output_path, "busy_labels", result.busy_labels)
     _write_output_multiline(output_path, "label_summary", result.label_summary)
     if result.label_errors:
         _write_output_multiline(output_path, "label_errors", result.label_errors)
@@ -246,7 +246,7 @@ def _run_manage_labels(args: argparse.Namespace) -> int:
         labeled_jobs_repos=labeled_jobs_repos,
     )
     print(f"Pending standby labels: {result.pending_labels}")
-    print(f"Fleet busy: {str(result.fleet_busy).lower()}")
+    print(f"Busy fleet labels: {result.busy_labels}")
     _write_label_management_outputs(args.github_output, result)
 
     # Keep behavior aligned with the old shell step cleanup.

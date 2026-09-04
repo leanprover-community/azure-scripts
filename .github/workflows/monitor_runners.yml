@@ -77,10 +77,11 @@ jobs:
 
       # The hoskinson hosts are unlabeled standby capacity behind the stable
       # runner fleet. This step adds a standby label (`pr`, `bors`) to idle
-      # hoskinson runners only when every online non-hoskinson runner is busy
-      # and a queued job requests that label; otherwise it strips routing
-      # labels from idle hoskinson runners (leanprover-community/docker,
-      # github-runner-app/README.md "Runner labels").
+      # hoskinson runners only when every online non-hoskinson runner that
+      # carries that label is busy and a queued job requests it; otherwise it
+      # strips routing labels from idle hoskinson runners
+      # (leanprover-community/docker, github-runner-app/README.md
+      # "Runner labels").
       - name: Manage runner labels
         id: manage-labels
         if: steps.check-runners.outputs.api_ok == 'true'
@@ -264,7 +265,7 @@ jobs:
           echo ""
           echo "=== Label Management Summary ==="
           echo "Pending standby labels: ${{ steps.manage-labels.outputs.pending_labels }}"
-          echo "Fleet busy: ${{ steps.manage-labels.outputs.fleet_busy }}"
+          echo "Busy fleet labels: ${{ steps.manage-labels.outputs.busy_labels }}"
           cat << 'EOF'
           ${{ steps.manage-labels.outputs.label_summary }}
           EOF
