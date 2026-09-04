@@ -14,7 +14,7 @@ from monitor_runners.label_management import (
     PendingLabeledJobs,
     PendingLabeledJobsClient,
     RunnerLabelManager,
-    fleet_is_busy,
+    busy_fleet_labels,
     render_pending_labels,
 )
 from monitor_runners.models import GitHubRunnersPayload
@@ -50,6 +50,11 @@ def _payload(runners: list[dict]) -> GitHubRunnersPayload:
 def _pending(*labels: str, check_failed: bool = False) -> PendingLabeledJobs:
     """Build a pending-jobs result for policy scenarios."""
     return PendingLabeledJobs(pending=frozenset(labels), check_failed=check_failed)
+
+
+def _busy(*labels: str) -> frozenset[str]:
+    """Build a busy-labels set for policy scenarios."""
+    return frozenset(labels)
 
 
 class _FakeRunnerLabelApi:
@@ -91,54 +96,73 @@ class _FakeHttpResponse:
         return self._raw
 
 
-class FleetIsBusyTests(unittest.TestCase):
-    """Unit tests for the non-hoskinson fleet busy signal."""
+class BusyFleetLabelsTests(unittest.TestCase):
+    """Unit tests for the per-label non-hoskinson busy signal."""
 
-    def test_all_online_fleet_runners_busy_is_true(self) -> None:
+    def test_all_runners_with_the_label_busy_reports_label_busy(self) -> None:
         payload = _payload(
             [
-                _runner(1, "fleet-a", busy=True),
-                _runner(2, "fleet-b", busy=True),
+                _runner(1, "fleet-a", busy=True, custom_labels=["pr"]),
+                _runner(2, "fleet-b", busy=True, custom_labels=["pr", "bors"]),
                 _runner(3, "hoskinson1", busy=False),
             ]
         )
-        self.assertTrue(fleet_is_busy(payload))
+        self.assertEqual(busy_fleet_labels(payload), frozenset({"pr", "bors"}))
 
-    def test_one_idle_online_fleet_runner_is_false(self) -> None:
+    def test_idle_runner_clears_only_its_own_labels(self) -> None:
+        """An idle `bors` runner must not make the starved `pr` queue look served."""
         payload = _payload(
             [
-                _runner(1, "fleet-a", busy=True),
-                _runner(2, "fleet-b", busy=False),
+                _runner(1, "fleet-a", busy=True, custom_labels=["pr"]),
+                _runner(2, "fleet-b", busy=False, custom_labels=["bors"]),
             ]
         )
-        self.assertFalse(fleet_is_busy(payload))
+        self.assertEqual(busy_fleet_labels(payload), frozenset({"pr"}))
 
-    def test_idle_offline_fleet_runner_does_not_count(self) -> None:
+    def test_idle_runner_carrying_both_labels_clears_both(self) -> None:
         payload = _payload(
             [
-                _runner(1, "fleet-a", busy=True),
-                _runner(2, "fleet-b", status="offline", busy=False),
+                _runner(1, "fleet-a", busy=False, custom_labels=["pr", "bors"]),
             ]
         )
-        self.assertTrue(fleet_is_busy(payload))
+        self.assertEqual(busy_fleet_labels(payload), frozenset())
 
-    def test_no_fleet_runners_is_vacuously_true(self) -> None:
+    def test_idle_offline_runner_does_not_count(self) -> None:
+        payload = _payload(
+            [
+                _runner(1, "fleet-a", busy=True, custom_labels=["pr", "bors"]),
+                _runner(2, "fleet-b", status="offline", busy=False, custom_labels=["pr"]),
+            ]
+        )
+        self.assertEqual(busy_fleet_labels(payload), frozenset({"pr", "bors"}))
+
+    def test_label_without_fleet_runners_is_vacuously_busy(self) -> None:
+        """A label no online fleet runner carries has no other capacity behind it."""
+        payload = _payload(
+            [
+                _runner(1, "fleet-a", busy=False, custom_labels=["pr"]),
+            ]
+        )
+        self.assertEqual(busy_fleet_labels(payload), frozenset({"bors"}))
+
+    def test_no_fleet_runners_makes_every_label_busy(self) -> None:
         payload = _payload(
             [
                 _runner(1, "hoskinson1", busy=False),
                 _runner(2, "hoskinson2", busy=False),
             ]
         )
-        self.assertTrue(fleet_is_busy(payload))
+        self.assertEqual(busy_fleet_labels(payload), frozenset({"pr", "bors"}))
 
     def test_idle_hoskinson_runner_does_not_affect_signal(self) -> None:
+        """Standby runners labeled by this policy must not clear their own label."""
         payload = _payload(
             [
-                _runner(1, "hoskinson1-20240101", busy=False),
-                _runner(2, "fleet-a", busy=True),
+                _runner(1, "hoskinson1-20240101", busy=False, custom_labels=["pr", "bors"]),
+                _runner(2, "fleet-a", busy=True, custom_labels=["pr", "bors"]),
             ]
         )
-        self.assertTrue(fleet_is_busy(payload))
+        self.assertEqual(busy_fleet_labels(payload), frozenset({"pr", "bors"}))
 
 
 class RunnerLabelManagerTests(unittest.TestCase):
@@ -152,11 +176,11 @@ class RunnerLabelManagerTests(unittest.TestCase):
         self,
         runners: list[dict],
         pending_jobs: PendingLabeledJobs,
-        fleet_busy: bool,
+        busy_labels: frozenset[str],
     ) -> tuple[_FakeRunnerLabelApi, object]:
         api = _FakeRunnerLabelApi()
         manager = RunnerLabelManager(payload=_payload(runners), api=api)
-        result = manager.apply_policy(pending_jobs=pending_jobs, fleet_busy=fleet_busy)
+        result = manager.apply_policy(pending_jobs=pending_jobs, busy_labels=busy_labels)
         return api, result
 
     def test_starved_label_is_added_only_to_idle_online_runners(self) -> None:
@@ -172,7 +196,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
                 _runner(104, "hoskinson4", busy=True, custom_labels=["ephemeral"]),
             ],
             _pending("pr"),
-            fleet_busy=True,
+            busy_labels=_busy("pr", "bors"),
         )
 
         self.assertEqual(api.added, {(101, "pr")})
@@ -180,13 +204,13 @@ class RunnerLabelManagerTests(unittest.TestCase):
         self.assertFalse(result.label_errors)
 
     def test_all_starved_labels_are_added(self) -> None:
-        """Every pending standby label is handed out when the fleet is busy."""
+        """Every pending label whose fleet capacity is busy is handed out."""
         api, result = self._apply(
             [
                 _runner(201, "hoskinson1", busy=False, custom_labels=["ephemeral"]),
             ],
             _pending("pr", "bors"),
-            fleet_busy=True,
+            busy_labels=_busy("pr", "bors"),
         )
 
         self.assertEqual(api.added, {(201, "pr"), (201, "bors")})
@@ -208,7 +232,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
                 _runner(304, "fleet-a", busy=False, custom_labels=["pr", "bors"]),
             ],
             _pending("pr"),
-            fleet_busy=False,
+            busy_labels=_busy(),
         )
 
         self.assertEqual(api.added, set())
@@ -225,21 +249,39 @@ class RunnerLabelManagerTests(unittest.TestCase):
                 _runner(401, "hoskinson1", busy=False, custom_labels=["ephemeral", "bors"]),
             ],
             _pending("pr"),
-            fleet_busy=True,
+            busy_labels=_busy("pr", "bors"),
         )
 
         self.assertEqual(api.added, {(401, "pr")})
         self.assertEqual(api.removed, {(401, "bors")})
         self.assertFalse(result.label_errors)
 
-    def test_busy_fleet_without_pending_jobs_keeps_standby_unlabeled(self) -> None:
-        """A busy fleet with an empty queue is not a reason to label standby."""
+    def test_label_with_idle_fleet_capacity_is_not_handed_to_standby(self) -> None:
+        """A queued label whose own fleet runners are idle must stay unlabeled.
+
+        `pr` is starved and gets standby capacity; `bors` still has idle fleet
+        runners, so the standby runner loses its leftover `bors` label.
+        """
+        api, result = self._apply(
+            [
+                _runner(451, "hoskinson1", busy=False, custom_labels=["ephemeral", "bors"]),
+            ],
+            _pending("pr", "bors"),
+            busy_labels=_busy("pr"),
+        )
+
+        self.assertEqual(api.added, {(451, "pr")})
+        self.assertEqual(api.removed, {(451, "bors")})
+        self.assertFalse(result.label_errors)
+
+    def test_busy_labels_without_pending_jobs_keep_standby_unlabeled(self) -> None:
+        """Busy fleet labels with an empty queue are not a reason to label standby."""
         api, result = self._apply(
             [
                 _runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr"]),
             ],
             _pending(),
-            fleet_busy=True,
+            busy_labels=_busy("pr", "bors"),
         )
 
         self.assertEqual(api.added, set())
@@ -257,7 +299,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
                 _runner(601, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr"]),
             ],
             _pending(check_failed=True),
-            fleet_busy=True,
+            busy_labels=_busy("pr", "bors"),
         )
 
         self.assertEqual(api.added, set())
@@ -271,7 +313,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
                 _runner(701, "hoskinson1", busy=False, custom_labels=["ephemeral", "bors"]),
             ],
             _pending("pr", check_failed=True),
-            fleet_busy=True,
+            busy_labels=_busy("pr", "bors"),
         )
 
         self.assertEqual(api.added, {(701, "pr")})
@@ -290,7 +332,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
                 ),
             ],
             _pending("bors"),
-            fleet_busy=True,
+            busy_labels=_busy("pr", "bors"),
         )
 
         self.assertEqual(api.added, set())
@@ -301,11 +343,11 @@ class RunnerLabelManagerTests(unittest.TestCase):
         """Runners outside the hoskinson naming scheme must never be mutated."""
         api, result = self._apply(
             [
-                _runner(901, "fleet-a", busy=False, custom_labels=["pr", "bors"]),
+                _runner(901, "fleet-a", busy=False, custom_labels=["bors"]),
                 _runner(902, "hoskinson1", busy=False, custom_labels=["ephemeral"]),
             ],
             _pending("pr"),
-            fleet_busy=True,
+            busy_labels=_busy("pr"),
         )
 
         self.assertEqual(api.added, {(902, "pr")})
@@ -319,7 +361,7 @@ class RunnerLabelManagerTests(unittest.TestCase):
                 _runner(1001, "experimental-a", busy=False, custom_labels=[]),
             ],
             _pending(),
-            fleet_busy=False,
+            busy_labels=_busy(),
         )
 
         self.assertEqual(api.added, set())
