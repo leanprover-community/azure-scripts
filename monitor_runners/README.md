@@ -12,6 +12,10 @@ Python package for self-hosted runner monitoring and weekly reporting.
   - `check-runners`
   - `manage-labels`
   - `weekly-report`
+  - `label-loop`: repeats label management on an interval (default 30s) until a
+    deadline; the workflow runs it in a dedicated `label-management-loop` job so
+    each run keeps managing labels until the next scheduled run cancels it
+    (`concurrency.cancel-in-progress`).
 
 ## Run tests
 All tests:

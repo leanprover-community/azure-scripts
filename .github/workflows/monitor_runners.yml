@@ -13,6 +13,13 @@ on:
         default: false
         type: boolean
 
+# Each run ends with a label-management loop that repeats until the next
+# scheduled run starts. cancel-in-progress hands the loop over to the new run,
+# which approximates one continuous monitoring loop across scheduled runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   ZULIP_SERVER: "https://leanprover.zulipchat.com"
   ZULIP_CHANNEL: "CI admins"
@@ -293,6 +300,38 @@ jobs:
           else
             echo "📊 Weekly report generated but not sent (not scheduled weekly run)"
           fi
+
+  # Repeat label management every 30 seconds so standby runners react to
+  # fleet busyness quickly between scheduled runs. The loop runs until the
+  # next run cancels this one (see `concurrency`), so most runs finish as
+  # "cancelled" by design. --max-seconds stops the loop before the 1-hour
+  # app token expires in case GitHub drops several scheduled runs in a row.
+  # The monitor-runners pipeline (state machine, stats, Zulip status) stays
+  # on the 15-minute schedule: its alert thresholds count consecutive checks
+  # and its stats keep one sample per check, so it must not loop.
+  label-management-loop:
+    needs: monitor-runners
+    runs-on: ubuntu-latest
+    # The loop caps itself at 45 minutes (below the 1-hour app token
+    # lifetime); this timeout is a safety net above that cap.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        id: app-token
+        with:
+          app-id: ${{ secrets.LEANPROVER_COMMUNITY_RUNNERS_APP_ID }}
+          private-key: ${{ secrets.LEANPROVER_COMMUNITY_RUNNERS_PRIVATE_KEY }}
+
+      - name: Label management loop
+        run: |
+          python3 -m monitor_runners.workflow label-loop \
+            --token "${{ steps.app-token.outputs.token }}" \
+            --org "${{ github.repository_owner }}" \
+            --dry-run "${{ env.DRY_RUN }}" \
+            --interval-seconds 30 \
+            --max-seconds 2700
 
   workflow-keepalive:
     if: github.event_name == 'schedule'

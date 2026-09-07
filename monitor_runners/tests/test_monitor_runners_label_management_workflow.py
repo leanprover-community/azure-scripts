@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
@@ -204,6 +205,187 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
             summary = outputs.get("label_summary", "")
             self.assertIn("Dry-run", summary)
             self.assertIn("hoskinson1", summary)
+
+
+class _FakeClock:
+    """Deterministic clock where only sleep() advances time."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
+        self.sleeps: list[float] = []
+
+    def utcnow(self) -> datetime:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += timedelta(seconds=seconds)
+
+
+def _payload_dict() -> dict:
+    """Return the minimal runners payload dict used by label-loop tests."""
+    return {
+        "total_count": 1,
+        "runners": [
+            {
+                "id": 1,
+                "name": "hoskinson1",
+                "status": "online",
+                "busy": False,
+                "os": "Linux",
+                "labels": [{"name": "pr", "type": "custom"}],
+            }
+        ],
+    }
+
+
+class WorkflowLabelLoopTests(unittest.TestCase):
+    """Tests for workflow.py `label-loop` command iteration behavior."""
+
+    def test_label_loop_repeats_until_deadline(self) -> None:
+        """Loop should run one label-management pass per interval until the deadline.
+
+        Scenario:
+        - fake clock starts at t=0 with `--max-seconds 60` and `--interval-seconds 30`.
+        - only sleep() advances the clock, so iterations land at t=0, 30, 60.
+
+        Expected behavior:
+        - exactly 3 iterations run, with a 30-second sleep between them.
+        - each iteration passes the parsed dry_run flag to label management.
+        - command exits 0.
+        """
+        clock = _FakeClock()
+        with (
+            patch("monitor_runners.workflow._utc_now", side_effect=clock.utcnow),
+            patch("monitor_runners.workflow.time") as mock_time,
+            patch(
+                "monitor_runners.workflow._fetch_github_runners",
+                return_value=_payload_dict(),
+            ) as fetch,
+            patch(
+                "monitor_runners.workflow.execute_label_management",
+                return_value=LabelManagementResult(
+                    pending_labels="none",
+                    busy_labels="none",
+                    label_summary="",
+                    label_errors="",
+                ),
+            ) as execute,
+        ):
+            mock_time.sleep.side_effect = clock.sleep
+            rc = main(
+                [
+                    "label-loop",
+                    "--token",
+                    "token",
+                    "--org",
+                    "leanprover-community",
+                    "--dry-run",
+                    "true",
+                    "--interval-seconds",
+                    "30",
+                    "--max-seconds",
+                    "60",
+                ]
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(clock.sleeps, [30.0, 30.0])
+        self.assertIs(execute.call_args.kwargs.get("dry_run"), True)
+
+    def test_label_loop_skips_iteration_on_fetch_failure(self) -> None:
+        """A failed payload fetch should skip label management but keep looping.
+
+        Scenario:
+        - first fetch returns None (API failure), second returns a valid payload.
+        - deadline allows exactly 2 iterations.
+
+        Expected behavior:
+        - label management runs only for the successful fetch.
+        - command still exits 0.
+        """
+        clock = _FakeClock()
+        with (
+            patch("monitor_runners.workflow._utc_now", side_effect=clock.utcnow),
+            patch("monitor_runners.workflow.time") as mock_time,
+            patch(
+                "monitor_runners.workflow._fetch_github_runners",
+                side_effect=[None, _payload_dict()],
+            ) as fetch,
+            patch(
+                "monitor_runners.workflow.execute_label_management",
+                return_value=LabelManagementResult(
+                    pending_labels="none",
+                    busy_labels="none",
+                    label_summary="",
+                    label_errors="",
+                ),
+            ) as execute,
+        ):
+            mock_time.sleep.side_effect = clock.sleep
+            rc = main(
+                [
+                    "label-loop",
+                    "--token",
+                    "token",
+                    "--org",
+                    "leanprover-community",
+                    "--interval-seconds",
+                    "30",
+                    "--max-seconds",
+                    "30",
+                ]
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(execute.call_count, 1)
+
+    def test_label_loop_exits_cleanly_on_interrupt(self) -> None:
+        """Cancellation (SIGINT/KeyboardInterrupt) should end the loop with exit 0.
+
+        Scenario:
+        - sleep raises KeyboardInterrupt, as when a newer run cancels this one.
+
+        Expected behavior:
+        - command returns 0 instead of propagating the interrupt.
+        """
+        clock = _FakeClock()
+        with (
+            patch("monitor_runners.workflow._utc_now", side_effect=clock.utcnow),
+            patch("monitor_runners.workflow.time") as mock_time,
+            patch(
+                "monitor_runners.workflow._fetch_github_runners",
+                return_value=_payload_dict(),
+            ),
+            patch(
+                "monitor_runners.workflow.execute_label_management",
+                return_value=LabelManagementResult(
+                    pending_labels="none",
+                    busy_labels="none",
+                    label_summary="",
+                    label_errors="",
+                ),
+            ),
+        ):
+            mock_time.sleep.side_effect = KeyboardInterrupt
+            rc = main(
+                [
+                    "label-loop",
+                    "--token",
+                    "token",
+                    "--org",
+                    "leanprover-community",
+                    "--interval-seconds",
+                    "30",
+                    "--max-seconds",
+                    "3600",
+                ]
+            )
+
+        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":
