@@ -10,7 +10,7 @@ It is responsible for:
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -254,6 +254,72 @@ def _run_manage_labels(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_label_loop(args: argparse.Namespace) -> int:
+    """Run label management repeatedly until the deadline or cancellation.
+
+    The workflow relies on ``concurrency.cancel-in-progress``: each run loops
+    here until the next scheduled run cancels it, which approximates a
+    continuous label-management daemon at ``--interval-seconds`` granularity.
+    ``--max-seconds`` bounds the loop below the GitHub App installation token
+    lifetime (1 hour) so a run never keeps mutating labels with a token that
+    is about to expire when scheduled runs stop arriving.
+    """
+    dry_run = _to_bool(args.dry_run)
+    if dry_run:
+        print("DRY RUN: skipping runner label mutations (non-master branch)")
+
+    labeled_jobs_repos = tuple(
+        repo.strip() for repo in args.labeled_jobs_repos.split(",") if repo.strip()
+    )
+    interval = args.interval_seconds
+    deadline = _utc_now() + timedelta(seconds=args.max_seconds)
+
+    iteration = 0
+    try:
+        while True:
+            iteration += 1
+            print(f"[label-loop] iteration {iteration} at {_utc_now().isoformat()}", flush=True)
+
+            payload = _fetch_github_runners(args.org, args.token)
+            if payload is None:
+                # Transient API failures are retried naturally on the next
+                # iteration; there is no point in a tighter inner retry.
+                print(
+                    "[label-loop] failed to fetch runners payload, retrying next iteration",
+                    flush=True,
+                )
+            else:
+                result = execute_label_management(
+                    payload=GitHubRunnersPayload.from_dict(payload),
+                    org=args.org,
+                    token=args.token,
+                    dry_run=dry_run,
+                    labeled_jobs_repos=labeled_jobs_repos,
+                )
+                print(f"[label-loop] pending standby labels: {result.pending_labels}", flush=True)
+                print(f"[label-loop] busy fleet labels: {result.busy_labels}", flush=True)
+                if result.label_summary:
+                    print(result.label_summary, flush=True)
+                if result.label_errors:
+                    # Loop iterations only log errors; the once-per-run
+                    # manage-labels step owns Zulip error notifications.
+                    print(f"[label-loop] errors:\n{result.label_errors}", flush=True)
+
+            if _utc_now() + timedelta(seconds=interval) > deadline:
+                print(
+                    f"[label-loop] deadline reached after {iteration} iterations, exiting",
+                    flush=True,
+                )
+                return 0
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print(
+            "[label-loop] interrupted (likely cancelled by a newer run), exiting",
+            flush=True,
+        )
+        return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build CLI parser for workflow subcommands."""
     parser = argparse.ArgumentParser(description="Runner monitor workflow helpers")
@@ -286,6 +352,14 @@ def _build_parser() -> argparse.ArgumentParser:
     manage.add_argument(
         "--github-output", default=os.environ.get("GITHUB_OUTPUT", "")
     )
+
+    loop = subparsers.add_parser("label-loop")
+    loop.add_argument("--token", required=True)
+    loop.add_argument("--org", required=True)
+    loop.add_argument("--dry-run", default="false")
+    loop.add_argument("--labeled-jobs-repos", default=",".join(LABELED_JOBS_REPOS))
+    loop.add_argument("--interval-seconds", type=float, default=30.0)
+    loop.add_argument("--max-seconds", type=float, default=2700.0)
     return parser
 
 
@@ -294,7 +368,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if not args.github_output:
+    if hasattr(args, "github_output") and not args.github_output:
         parser.error("missing --github-output and GITHUB_OUTPUT is unset")
 
     if args.command == "check-runners":
@@ -303,6 +377,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _run_weekly_report(args)
     if args.command == "manage-labels":
         return _run_manage_labels(args)
+    if args.command == "label-loop":
+        return _run_label_loop(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 
