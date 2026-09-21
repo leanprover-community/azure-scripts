@@ -14,6 +14,7 @@ from monitor_runners.label_management import (
     PendingLabeledJobs,
     PendingLabeledJobsClient,
     RunnerLabelManager,
+    StandbyLabelAddHysteresis,
     busy_fleet_labels,
     render_pending_labels,
 )
@@ -163,6 +164,43 @@ class BusyFleetLabelsTests(unittest.TestCase):
             ]
         )
         self.assertEqual(busy_fleet_labels(payload), frozenset({"pr", "bors"}))
+
+
+class StandbyLabelAddHysteresisTests(unittest.TestCase):
+    """Unit tests for the standby label addition delay."""
+
+    def test_label_not_ready_until_threshold(self) -> None:
+        """Starvation must be continuous for threshold checks before label is ready."""
+        hysteresis = StandbyLabelAddHysteresis(threshold=3)
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+        self.assertIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+
+    def test_starvation_resets_when_not_starved(self) -> None:
+        """A check without starvation resets the counter for that label."""
+        hysteresis = StandbyLabelAddHysteresis(threshold=3)
+        hysteresis.observe(active={"pr"}, conclusive=True)
+        hysteresis.observe(active={"pr"}, conclusive=True)
+        hysteresis.observe(active=set(), conclusive=True)
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+        self.assertIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+
+    def test_counts_are_tracked_per_label(self) -> None:
+        """Different labels must have independent starvation counts."""
+        hysteresis = StandbyLabelAddHysteresis(threshold=2)
+        self.assertEqual(hysteresis.observe(active={"pr"}, conclusive=True), frozenset())
+        self.assertEqual(hysteresis.observe(active={"pr"}, conclusive=True), {"pr"})
+        self.assertEqual(hysteresis.observe(active={"bors"}, conclusive=True), frozenset())
+        self.assertEqual(hysteresis.observe(active={"bors"}, conclusive=True), {"bors"})
+
+    def test_inconclusive_check_does_not_advance_count(self) -> None:
+        """An incomplete pending-jobs check must not advance the starvation count."""
+        hysteresis = StandbyLabelAddHysteresis(threshold=3)
+        hysteresis.observe(active={"pr"}, conclusive=True)
+        hysteresis.observe(active={"pr"}, conclusive=False)
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+        self.assertIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
 
 
 class RunnerLabelManagerTests(unittest.TestCase):
@@ -367,6 +405,64 @@ class RunnerLabelManagerTests(unittest.TestCase):
         self.assertEqual(api.added, set())
         self.assertEqual(api.removed, set())
         self.assertTrue(result.label_errors)
+
+
+class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
+    """Policy tests for label addition under starvation delay."""
+
+    def _apply_with_hysteresis(
+        self, hysteresis: StandbyLabelAddHysteresis
+    ) -> tuple[_FakeRunnerLabelApi, object]:
+        api = _FakeRunnerLabelApi()
+        runners = [_runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral"])]
+        manager = RunnerLabelManager(payload=_payload(runners), api=api)
+        result = manager.apply_policy(
+            pending_jobs=_pending("pr"),
+            busy_labels=_busy("pr", "bors"),
+            add_hysteresis=hysteresis,
+        )
+        return api, result
+
+    def test_label_not_added_before_threshold(self) -> None:
+        """Starvation must reach the threshold before label is added."""
+        hysteresis = StandbyLabelAddHysteresis(threshold=2)
+        api, result = self._apply_with_hysteresis(hysteresis)
+        self.assertEqual(api.added, set())
+
+    def test_label_added_at_threshold(self) -> None:
+        """Label is added when starvation threshold is reached."""
+        hysteresis = StandbyLabelAddHysteresis(threshold=1)
+        api, result = self._apply_with_hysteresis(hysteresis)
+        self.assertEqual(api.added, {(501, "pr")})
+
+    def test_threshold_reached_adds_only_ready_labels(self) -> None:
+        """Only labels at threshold are added; others remain unlabeled."""
+        hysteresis = StandbyLabelAddHysteresis(threshold=2)
+        api, result = self._apply_with_hysteresis(hysteresis)
+        hysteresis.observe(active={"pr"}, conclusive=True)
+        api, result = self._apply_with_hysteresis(hysteresis)
+        self.assertEqual(api.added, {(501, "pr")})
+
+    def test_starvation_restart_resets_count(self) -> None:
+        """When starvation stops and restarts, the threshold delay applies again."""
+        hysteresis = StandbyLabelAddHysteresis(threshold=2)
+        # Reach threshold
+        api, result = self._apply_with_hysteresis(hysteresis)
+        self.assertEqual(api.added, set())
+        api, result = self._apply_with_hysteresis(hysteresis)
+        self.assertEqual(api.added, {(501, "pr")})
+        # Stop starvation
+        api_2 = _FakeRunnerLabelApi()
+        runners = [_runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral"])]
+        manager = RunnerLabelManager(payload=_payload(runners), api=api_2)
+        manager.apply_policy(
+            pending_jobs=_pending(),
+            busy_labels=_busy(),
+            add_hysteresis=hysteresis,
+        )
+        # Starvation restarts - should need to count again from 1
+        api, result = self._apply_with_hysteresis(hysteresis)
+        self.assertEqual(api.added, set())
 
 
 class RenderPendingLabelsTests(unittest.TestCase):

@@ -31,6 +31,11 @@ CLEANUP_LABEL = "cleanup-soon"
 # so this only matters when nothing is pending.
 MAX_RUNS_TO_INSPECT = 20
 
+# Consecutive checks with starvation needed before a standby label is
+# added. This delay allows burst capacity to respond first before involving
+# the standby pool. At 30 second polling interval, this is about 5 minutes.
+ADD_ITERATIONS = 10
+
 
 @dataclass
 class LabelManagementResult:
@@ -177,6 +182,46 @@ def busy_fleet_labels(
 def render_busy_labels(busy_labels: frozenset[str]) -> str:
     """Render the busy-labels result for outputs and logs."""
     return ",".join(sorted(busy_labels)) or "none"
+
+
+class StandbyLabelAddHysteresis:
+    """Delays standby label addition after starvation starts.
+
+    The policy adds a standby label only after `threshold` consecutive
+    checks that find starvation for that label. One instance is used for a
+    whole label-loop process, so the delay continues across loop iterations.
+    This allows burst capacity to respond first before involving the standby pool.
+
+    A new instance starts each count at zero.
+
+    A check that finds the label starved increments its count. An inconclusive
+    check (an incomplete pending-jobs check) leaves the count unchanged,
+    because it cannot prove that starvation started.
+
+    A check without starvation for that label resets its count to zero.
+    """
+
+    def __init__(self, threshold: int, labels: tuple[str, ...] = STANDBY_LABELS) -> None:
+        self.threshold = threshold
+        self._add_counts = {label: 0 for label in labels}
+
+    def observe(self, active: set[str], conclusive: bool) -> frozenset[str]:
+        """Record one check; return labels ready to add.
+
+        Returns labels that have reached the threshold of consecutive starvation
+        checks and are ready to be added to idle hoskinson runners.
+        """
+        ready: set[str] = set()
+        for label, count in self._add_counts.items():
+            if label in active:
+                if conclusive:
+                    count += 1
+                    self._add_counts[label] = count
+                if count >= self.threshold:
+                    ready.add(label)
+            else:
+                self._add_counts[label] = 0
+        return frozenset(ready)
 
 
 class RunnerLabelApi:
@@ -342,7 +387,10 @@ class RunnerLabelManager:
                     self._remove_label(runner, label)
 
     def apply_policy(
-        self, pending_jobs: PendingLabeledJobs, busy_labels: frozenset[str]
+        self,
+        pending_jobs: PendingLabeledJobs,
+        busy_labels: frozenset[str],
+        add_hysteresis: StandbyLabelAddHysteresis | None = None,
     ) -> LabelManagementResult:
         """Execute the standby label policy and return summarized outputs."""
         pending_text = render_pending_labels(pending_jobs)
@@ -357,6 +405,14 @@ class RunnerLabelManager:
             )
 
         active = set(STANDBY_LABELS).intersection(pending_jobs.pending, busy_labels)
+        ready: frozenset[str]
+        if add_hysteresis is not None:
+            ready = add_hysteresis.observe(
+                active=active, conclusive=not pending_jobs.check_failed
+            )
+        else:
+            # Without hysteresis, all active labels are immediately ready.
+            ready = frozenset(active)
 
         self._add_summary(f"Busy fleet labels: {busy_text}; queued labels: {pending_text}")
         if active:
@@ -364,15 +420,18 @@ class RunnerLabelManager:
             self._add_summary(f"Standby labels active: {active_text}")
         else:
             self._add_summary("No starved standby label; standby stays unlabeled")
+        if ready and ready != active:
+            ready_text = ", ".join(f"`{label}`" for label in sorted(ready))
+            self._add_summary(f"Standby labels ready to add: {ready_text}")
 
-        self._add_active_labels(active)
+        self._add_active_labels(ready)
         if pending_jobs.check_failed:
             self._add_error(
                 "**Label Management Error:** pending-jobs check incomplete; "
                 "left non-active labels in place"
             )
         else:
-            self._remove_inactive_labels(active)
+            self._remove_inactive_labels(ready)
 
         return LabelManagementResult(
             pending_labels=pending_text,
@@ -388,6 +447,7 @@ def execute_label_management(
     token: str,
     dry_run: bool,
     labeled_jobs_repos: tuple[str, ...] = LABELED_JOBS_REPOS,
+    add_hysteresis: StandbyLabelAddHysteresis | None = None,
 ) -> LabelManagementResult:
     """Run queue-aware standby label management for one runners payload."""
     pending_jobs = PendingLabeledJobsClient(
@@ -396,7 +456,9 @@ def execute_label_management(
     api = RunnerLabelApi(org=org, token=token, dry_run=dry_run)
     manager = RunnerLabelManager(payload=payload, api=api)
     result = manager.apply_policy(
-        pending_jobs=pending_jobs, busy_labels=busy_fleet_labels(payload)
+        pending_jobs=pending_jobs,
+        busy_labels=busy_fleet_labels(payload),
+        add_hysteresis=add_hysteresis,
     )
     if dry_run:
         if result.label_summary:
