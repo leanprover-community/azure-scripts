@@ -37,12 +37,12 @@ MAX_RUNS_TO_INSPECT = 20
 # 5 minutes.
 ADD_ITERATIONS = 10
 
-# Consecutive clear checks needed before a standby label is removed. A queue
-# starves intermittently, so a label that goes away at the first clear check
-# is handed back minutes later, after another ADD_ITERATIONS delay. The grace
-# period holds the label through the gaps. At the 30-second poll interval,
-# 10 checks are about 5 minutes.
-KEEP_ITERATIONS = 10
+# Consecutive clear checks needed before a standby label is removed. One
+# removes the label at the first check that finds the starvation over, which
+# sends the traffic back to the burst runners as soon as the queue drains. A
+# queue that starves intermittently then waits another ADD_ITERATIONS delay
+# for its label, so raise this value to hold the label through those gaps.
+KEEP_ITERATIONS = 1
 
 
 @dataclass
@@ -213,8 +213,9 @@ class StandbyLabelHysteresis:
     for `keep_threshold` more checks. The label loop keeps one instance for
     the whole process, so both counts continue across iterations.
 
-    A new instance starts both counts at zero, so it holds every standby
-    label where it is: one check alone neither adds nor removes.
+    A new instance starts both counts at zero, so one check alone advances
+    a count to one. A threshold of one therefore acts on that check, and a
+    higher threshold holds the label where it is.
 
     A conclusive check advances the count that matches what it found and
     resets the other. An inconclusive check (an incomplete pending-jobs

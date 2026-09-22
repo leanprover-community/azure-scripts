@@ -241,10 +241,11 @@ def _run_manage_labels(args: argparse.Namespace) -> int:
         repo.strip() for repo in args.labeled_jobs_repos.split(",") if repo.strip()
     )
     payload = GitHubRunnersPayload.from_dict(_load_json_file(args.response_file))
-    # A fresh hysteresis counts one check here, which stays below both
-    # thresholds, so this once-per-run step leaves the standby labels as they
-    # are. It still strips the specialty labels. The label loop holds its
-    # counts across iterations and does the standby adds and removals.
+    # A fresh hysteresis counts one check here, which stays below the add
+    # threshold, so this once-per-run step never adds a standby label; the
+    # label loop holds its counts across iterations and does that. The step
+    # does remove a standby label while KEEP_ITERATIONS is one, and it always
+    # strips the specialty labels.
     hysteresis = StandbyLabelHysteresis(
         add_threshold=ADD_ITERATIONS, keep_threshold=KEEP_ITERATIONS
     )

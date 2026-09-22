@@ -87,11 +87,12 @@ jobs:
       # runner only when every online non-hoskinson runner that carries that
       # label is busy and a queued job requests it
       # (leanprover-community/docker, github-runner-app/README.md
-      # "Runner labels"). Adding and removing a standby label both wait for 10
-      # consecutive checks, counted within one process, so this single-check
-      # step leaves the standby labels as they are; the label-management-loop
-      # job below holds the counts and makes those changes. This step still
-      # strips the specialty labels, which wait for nothing.
+      # "Runner labels"). A standby label waits for 10 consecutive checks
+      # before it is added, counted within one process, so this single-check
+      # step never adds one; the label-management-loop job below holds the
+      # counts and does that. Removal waits for nothing at present, so this
+      # step does remove a standby label once its queue is no longer starved.
+      # It also strips the specialty labels.
       - name: Manage runner labels
         id: manage-labels
         if: steps.check-runners.outputs.api_ok == 'true'

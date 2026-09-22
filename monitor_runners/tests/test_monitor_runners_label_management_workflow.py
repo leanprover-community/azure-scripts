@@ -210,15 +210,15 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
             self.assertIn("Dry-run", summary)
             self.assertIn("Removed `doc-gen` label from runner `hoskinson1`", summary)
 
-    def test_manage_labels_single_pass_keeps_standby_labels(self) -> None:
-        """The once-per-run step must leave the standby labels as they are.
+    def test_manage_labels_single_pass_removes_standby_labels(self) -> None:
+        """The once-per-run step must remove a standby label with no grace period.
 
         Scenario:
         - real label-management execution path, nothing pending.
         - the default thresholds and one single check.
 
         Expected behavior:
-        - no removal appears in the summary; the grace period is reported.
+        - the summary reports the removal, because KEEP_ITERATIONS is one.
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -249,8 +249,8 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             outputs = _parse_github_output(output_file)
             summary = outputs.get("label_summary", "")
-            self.assertNotIn("Removed", summary)
-            self.assertIn("grace period", summary)
+            self.assertIn("Removed `pr` label", summary)
+            self.assertNotIn("grace period", summary)
 
 
 class _FakeClock:
