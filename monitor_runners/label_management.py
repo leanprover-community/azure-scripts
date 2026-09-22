@@ -295,12 +295,16 @@ class RunnerLabelManager:
        |
        v
     [Phase 1] Add each active label to every idle online hoskinson runner
-       that lacks it, so the starved queue gets standby capacity.
+       that lacks it, so the starved queue gets standby capacity. An
+       optional hysteresis delays this until the label has been starved for
+       several consecutive checks, which lets autoscaling serve the surge
+       first.
        |
        v
     [Phase 2] Remove every non-active routing label from every idle
        hoskinson runner, returning the standby pool to its unlabeled
-       baseline. Offline idle runners are stripped too.
+       baseline. Offline idle runners are stripped too. The hysteresis does
+       not delay removal: only starvation keeps a label in place.
 
     When the pending-jobs check is incomplete, labels found pending are still
     added (Phase 1); Phase 2 is skipped entirely, because a label missing from
@@ -431,7 +435,10 @@ class RunnerLabelManager:
                 "left non-active labels in place"
             )
         else:
-            self._remove_inactive_labels(ready)
+            # Removal stays keyed on `active`, not `ready`: the hysteresis
+            # only delays additions. Keying removal on `ready` would make
+            # every fresh instance strip labels an earlier process handed out.
+            self._remove_inactive_labels(active)
 
         return LabelManagementResult(
             pending_labels=pending_text,

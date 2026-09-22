@@ -464,6 +464,35 @@ class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
         api, result = self._apply_with_hysteresis(hysteresis)
         self.assertEqual(api.added, set())
 
+    def test_label_already_held_survives_warm_up(self) -> None:
+        """Warm-up delays the add; it must not strip a label already handed out.
+
+        A fresh hysteresis holds every label back, which is what the
+        once-per-run manage-labels step uses. Removal stays keyed on
+        starvation, so a label another process handed out stays in place.
+        """
+        api = _FakeRunnerLabelApi()
+        runners = [_runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr"])]
+        manager = RunnerLabelManager(payload=_payload(runners), api=api)
+        manager.apply_policy(
+            pending_jobs=_pending("pr"),
+            busy_labels=_busy("pr", "bors"),
+            add_hysteresis=StandbyLabelAddHysteresis(threshold=10),
+        )
+        self.assertEqual(api.removed, set())
+
+    def test_label_removed_when_starvation_stops(self) -> None:
+        """Removal is immediate once starvation stops, delay or not."""
+        api = _FakeRunnerLabelApi()
+        runners = [_runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr"])]
+        manager = RunnerLabelManager(payload=_payload(runners), api=api)
+        manager.apply_policy(
+            pending_jobs=_pending(),
+            busy_labels=_busy(),
+            add_hysteresis=StandbyLabelAddHysteresis(threshold=10),
+        )
+        self.assertEqual(api.removed, {(501, "pr")})
+
 
 class RenderPendingLabelsTests(unittest.TestCase):
     """Unit tests for pending-labels output rendering."""
