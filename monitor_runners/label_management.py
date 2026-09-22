@@ -31,9 +31,10 @@ CLEANUP_LABEL = "cleanup-soon"
 # so this only matters when nothing is pending.
 MAX_RUNS_TO_INSPECT = 20
 
-# Consecutive checks with starvation needed before a standby label is
-# added. This delay allows burst capacity to respond first before involving
-# the standby pool. At 30 second polling interval, this is about 5 minutes.
+# Consecutive starved checks needed before a standby label is added. The
+# delay lets burst capacity serve the surge first: it delivers runners in
+# about 220 seconds, and at the 30-second poll interval 10 checks are about
+# 5 minutes.
 ADD_ITERATIONS = 10
 
 
@@ -185,20 +186,17 @@ def render_busy_labels(busy_labels: frozenset[str]) -> str:
 
 
 class StandbyLabelAddHysteresis:
-    """Delays standby label addition after starvation starts.
+    """Delays standby label addition until starvation persists.
 
-    The policy adds a standby label only after `threshold` consecutive
-    checks that find starvation for that label. One instance is used for a
-    whole label-loop process, so the delay continues across loop iterations.
-    This allows burst capacity to respond first before involving the standby pool.
+    A label becomes ready to add only after `threshold` consecutive checks
+    find it starved. The label loop keeps one instance for the whole
+    process, so the count continues across iterations.
 
-    A new instance starts each count at zero.
-
-    A check that finds the label starved increments its count. An inconclusive
-    check (an incomplete pending-jobs check) leaves the count unchanged,
-    because it cannot prove that starvation started.
-
-    A check without starvation for that label resets its count to zero.
+    A new instance starts each count at zero. A conclusive check that finds
+    the label starved increments its count. An inconclusive check (an
+    incomplete pending-jobs check) leaves the count as it is, because it
+    cannot prove starvation. A check that finds no starvation resets the
+    count to zero.
     """
 
     def __init__(self, threshold: int, labels: tuple[str, ...] = STANDBY_LABELS) -> None:
@@ -206,11 +204,7 @@ class StandbyLabelAddHysteresis:
         self._add_counts = {label: 0 for label in labels}
 
     def observe(self, active: set[str], conclusive: bool) -> frozenset[str]:
-        """Record one check; return labels ready to add.
-
-        Returns labels that have reached the threshold of consecutive starvation
-        checks and are ready to be added to idle hoskinson runners.
-        """
+        """Record one check and return the labels that are ready to add."""
         ready: set[str] = set()
         for label, count in self._add_counts.items():
             if label in active:
@@ -294,17 +288,16 @@ class RunnerLabelManager:
     requests it.
        |
        v
-    [Phase 1] Add each active label to every idle online hoskinson runner
-       that lacks it, so the starved queue gets standby capacity. An
-       optional hysteresis delays this until the label has been starved for
-       several consecutive checks, which lets autoscaling serve the surge
-       first.
+    [Phase 1] Add each ready label to every idle online hoskinson runner
+       that lacks it, so the starved queue gets standby capacity. Every
+       active label is ready at once, unless an optional hysteresis holds it
+       back until starvation lasts `threshold` consecutive checks.
        |
        v
     [Phase 2] Remove every non-active routing label from every idle
-       hoskinson runner, returning the standby pool to its unlabeled
-       baseline. Offline idle runners are stripped too. The hysteresis does
-       not delay removal: only starvation keeps a label in place.
+       hoskinson runner, which returns the standby pool to its unlabeled
+       baseline. Idle offline runners are stripped too. Removal keys on
+       `active` alone, so a label stays only while its queue is starved.
 
     When the pending-jobs check is incomplete, labels found pending are still
     added (Phase 1); Phase 2 is skipped entirely, because a label missing from
@@ -367,10 +360,10 @@ class RunnerLabelManager:
         """Return true when runner carries the cleanup drain label."""
         return CLEANUP_LABEL in self._custom_labels(runner)
 
-    def _add_active_labels(self, active: set[str]) -> None:
-        """Add each active label to idle online runners that lack it."""
+    def _add_ready_labels(self, ready: set[str]) -> None:
+        """Add each ready label to idle online runners that lack it."""
         for label in STANDBY_LABELS:
-            if label not in active:
+            if label not in ready:
                 continue
             for runner in self.runners:
                 if not self._is_idle(runner) or runner.status != "online":
@@ -415,7 +408,6 @@ class RunnerLabelManager:
                 active=active, conclusive=not pending_jobs.check_failed
             )
         else:
-            # Without hysteresis, all active labels are immediately ready.
             ready = frozenset(active)
 
         self._add_summary(f"Busy fleet labels: {busy_text}; queued labels: {pending_text}")
@@ -428,16 +420,15 @@ class RunnerLabelManager:
             ready_text = ", ".join(f"`{label}`" for label in sorted(ready))
             self._add_summary(f"Standby labels ready to add: {ready_text}")
 
-        self._add_active_labels(ready)
+        self._add_ready_labels(ready)
         if pending_jobs.check_failed:
             self._add_error(
                 "**Label Management Error:** pending-jobs check incomplete; "
                 "left non-active labels in place"
             )
         else:
-            # Removal stays keyed on `active`, not `ready`: the hysteresis
-            # only delays additions. Keying removal on `ready` would make
-            # every fresh instance strip labels an earlier process handed out.
+            # Removal keys on `active`, not `ready`: the hysteresis delays
+            # additions only.
             self._remove_inactive_labels(active)
 
         return LabelManagementResult(

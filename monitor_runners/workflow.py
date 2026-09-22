@@ -240,9 +240,9 @@ def _run_manage_labels(args: argparse.Namespace) -> int:
         repo.strip() for repo in args.labeled_jobs_repos.split(",") if repo.strip()
     )
     payload = GitHubRunnersPayload.from_dict(_load_json_file(args.response_file))
-    # A new hysteresis makes one check here, which cannot reach ADD_ITERATIONS.
-    # This once-per-run step therefore never adds labels. The label loop keeps
-    # its counts across iterations and does the additions when the threshold is reached.
+    # A fresh hysteresis counts one check here, which stays below
+    # ADD_ITERATIONS, so this once-per-run step only removes labels. The label
+    # loop holds its counts across iterations and does the additions.
     add_hysteresis = StandbyLabelAddHysteresis(threshold=ADD_ITERATIONS)
     result = execute_label_management(
         payload=payload,
@@ -271,10 +271,9 @@ def _run_label_loop(args: argparse.Namespace) -> int:
     lifetime (1 hour) so a run never keeps mutating labels with a token that
     is about to expire when scheduled runs stop arriving.
 
-    One ``StandbyLabelAddHysteresis`` is shared by all iterations. It adds a
-    standby label only after ``--add-iterations`` consecutive iterations
-    with starvation. This allows burst capacity to respond first before
-    involving the standby pool.
+    All iterations share one ``StandbyLabelAddHysteresis``. It holds a standby
+    label back until ``--add-iterations`` consecutive iterations find that
+    label starved.
     """
     dry_run = _to_bool(args.dry_run)
     if dry_run:

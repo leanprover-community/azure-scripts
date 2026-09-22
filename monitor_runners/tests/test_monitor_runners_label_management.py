@@ -170,7 +170,7 @@ class StandbyLabelAddHysteresisTests(unittest.TestCase):
     """Unit tests for the standby label addition delay."""
 
     def test_label_not_ready_until_threshold(self) -> None:
-        """Starvation must be continuous for threshold checks before label is ready."""
+        """Starvation must be continuous for threshold checks before the label is ready."""
         hysteresis = StandbyLabelAddHysteresis(threshold=3)
         self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
         self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
@@ -460,16 +460,15 @@ class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
             busy_labels=_busy(),
             add_hysteresis=hysteresis,
         )
-        # Starvation restarts - should need to count again from 1
+        # Starvation restarts, so the count begins again at 1.
         api, result = self._apply_with_hysteresis(hysteresis)
         self.assertEqual(api.added, set())
 
     def test_label_already_held_survives_warm_up(self) -> None:
-        """Warm-up delays the add; it must not strip a label already handed out.
+        """A label already handed out must survive the warm-up.
 
-        A fresh hysteresis holds every label back, which is what the
-        once-per-run manage-labels step uses. Removal stays keyed on
-        starvation, so a label another process handed out stays in place.
+        A fresh hysteresis holds every label back, so no label is ready to
+        add. Removal keys on starvation, so a starved label stays in place.
         """
         api = _FakeRunnerLabelApi()
         runners = [_runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr"])]
@@ -482,7 +481,7 @@ class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
         self.assertEqual(api.removed, set())
 
     def test_label_removed_when_starvation_stops(self) -> None:
-        """Removal is immediate once starvation stops, delay or not."""
+        """Removal happens at the first check without starvation, delay or not."""
         api = _FakeRunnerLabelApi()
         runners = [_runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr"])]
         manager = RunnerLabelManager(payload=_payload(runners), api=api)

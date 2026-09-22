@@ -6,7 +6,7 @@ Python package for self-hosted runner monitoring and weekly reporting.
 
 - `core.py`: runner state machine, transition detection, alert planning, and orchestration.
 - `models.py`: typed data models/enums for GitHub payloads, state, and stats.
-- `label_management.py`: standby runner label policy. Labels idle hoskinson runners only when every non-hoskinson runner with that label is busy and jobs are queued behind it. Standby labels are added only after 10 consecutive checks detect starvation for that label, allowing burst capacity to respond first. Implements `StandbyLabelAddHysteresis` to prevent premature addition when starvation is intermittent. GitHub label mutation client included.
+- `label_management.py`: standby runner label policy and GitHub label mutation client. The policy labels idle hoskinson runners only when every non-hoskinson runner with that label is busy and jobs are queued behind it. It adds a standby label only after 10 consecutive checks find that label starved, so burst capacity serves the surge first.
 - `reporting.py`: weekly markdown report generation from stats.
 - `workflow.py`: GitHub Actions CLI entrypoints:
   - `check-runners`
