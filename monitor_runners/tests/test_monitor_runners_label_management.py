@@ -14,7 +14,7 @@ from monitor_runners.label_management import (
     PendingLabeledJobs,
     PendingLabeledJobsClient,
     RunnerLabelManager,
-    StandbyLabelAddHysteresis,
+    StandbyLabelHysteresis,
     busy_fleet_labels,
     render_pending_labels,
 )
@@ -56,6 +56,11 @@ def _pending(*labels: str, check_failed: bool = False) -> PendingLabeledJobs:
 def _busy(*labels: str) -> frozenset[str]:
     """Build a busy-labels set for policy scenarios."""
     return frozenset(labels)
+
+
+def _hysteresis(add_threshold: int = 1, keep_threshold: int = 1) -> StandbyLabelHysteresis:
+    """Build a hysteresis. A threshold of 1 is no delay on that side."""
+    return StandbyLabelHysteresis(add_threshold=add_threshold, keep_threshold=keep_threshold)
 
 
 class _FakeRunnerLabelApi:
@@ -166,41 +171,78 @@ class BusyFleetLabelsTests(unittest.TestCase):
         self.assertEqual(busy_fleet_labels(payload), frozenset({"pr", "bors"}))
 
 
-class StandbyLabelAddHysteresisTests(unittest.TestCase):
+class StandbyLabelHysteresisAddTests(unittest.TestCase):
     """Unit tests for the standby label addition delay."""
 
     def test_label_not_ready_until_threshold(self) -> None:
         """Starvation must be continuous for threshold checks before the label is ready."""
-        hysteresis = StandbyLabelAddHysteresis(threshold=3)
-        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
-        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
-        self.assertIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+        hysteresis = _hysteresis(add_threshold=3)
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True).ready)
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True).ready)
+        self.assertIn("pr", hysteresis.observe(active={"pr"}, conclusive=True).ready)
 
     def test_starvation_resets_when_not_starved(self) -> None:
         """A check without starvation resets the counter for that label."""
-        hysteresis = StandbyLabelAddHysteresis(threshold=3)
+        hysteresis = _hysteresis(add_threshold=3)
         hysteresis.observe(active={"pr"}, conclusive=True)
         hysteresis.observe(active={"pr"}, conclusive=True)
         hysteresis.observe(active=set(), conclusive=True)
-        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
-        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
-        self.assertIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True).ready)
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True).ready)
+        self.assertIn("pr", hysteresis.observe(active={"pr"}, conclusive=True).ready)
 
     def test_counts_are_tracked_per_label(self) -> None:
         """Different labels must have independent starvation counts."""
-        hysteresis = StandbyLabelAddHysteresis(threshold=2)
-        self.assertEqual(hysteresis.observe(active={"pr"}, conclusive=True), frozenset())
-        self.assertEqual(hysteresis.observe(active={"pr"}, conclusive=True), {"pr"})
-        self.assertEqual(hysteresis.observe(active={"bors"}, conclusive=True), frozenset())
-        self.assertEqual(hysteresis.observe(active={"bors"}, conclusive=True), {"bors"})
+        hysteresis = _hysteresis(add_threshold=2)
+        self.assertEqual(hysteresis.observe(active={"pr"}, conclusive=True).ready, frozenset())
+        self.assertEqual(hysteresis.observe(active={"pr"}, conclusive=True).ready, {"pr"})
+        self.assertEqual(hysteresis.observe(active={"bors"}, conclusive=True).ready, frozenset())
+        self.assertEqual(hysteresis.observe(active={"bors"}, conclusive=True).ready, {"bors"})
 
     def test_inconclusive_check_does_not_advance_count(self) -> None:
         """An incomplete pending-jobs check must not advance the starvation count."""
-        hysteresis = StandbyLabelAddHysteresis(threshold=3)
+        hysteresis = _hysteresis(add_threshold=3)
         hysteresis.observe(active={"pr"}, conclusive=True)
         hysteresis.observe(active={"pr"}, conclusive=False)
-        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
-        self.assertIn("pr", hysteresis.observe(active={"pr"}, conclusive=True))
+        self.assertNotIn("pr", hysteresis.observe(active={"pr"}, conclusive=True).ready)
+        self.assertIn("pr", hysteresis.observe(active={"pr"}, conclusive=True).ready)
+
+
+class StandbyLabelHysteresisKeepTests(unittest.TestCase):
+    """Unit tests for the standby label removal grace period."""
+
+    def test_label_stays_in_grace_until_threshold(self) -> None:
+        """A cleared label is kept for threshold-1 checks, then released."""
+        hysteresis = _hysteresis(keep_threshold=3)
+        self.assertIn("pr", hysteresis.observe(active=set(), conclusive=True).retained)
+        self.assertIn("pr", hysteresis.observe(active=set(), conclusive=True).retained)
+        self.assertNotIn("pr", hysteresis.observe(active=set(), conclusive=True).retained)
+
+    def test_starvation_resets_the_count(self) -> None:
+        """A check that finds starvation restarts the grace period."""
+        hysteresis = _hysteresis(keep_threshold=3)
+        hysteresis.observe(active=set(), conclusive=True)
+        hysteresis.observe(active=set(), conclusive=True)
+        hysteresis.observe(active={"pr"}, conclusive=True)
+        self.assertIn("pr", hysteresis.observe(active=set(), conclusive=True).retained)
+        self.assertIn("pr", hysteresis.observe(active=set(), conclusive=True).retained)
+        self.assertNotIn("pr", hysteresis.observe(active=set(), conclusive=True).retained)
+
+    def test_clear_counts_are_tracked_per_label(self) -> None:
+        """A starved `pr` must not extend the grace period of `bors`."""
+        hysteresis = _hysteresis(keep_threshold=3)
+        self.assertEqual(hysteresis.observe(active={"pr"}, conclusive=True).retained, {"bors"})
+        self.assertEqual(
+            hysteresis.observe(active=set(), conclusive=True).retained, {"pr", "bors"}
+        )
+        self.assertEqual(hysteresis.observe(active=set(), conclusive=True).retained, {"pr"})
+
+    def test_inconclusive_check_does_not_advance_the_count(self) -> None:
+        """An incomplete pending-jobs check must not shorten the grace period."""
+        hysteresis = _hysteresis(keep_threshold=2)
+        hysteresis.observe(active=set(), conclusive=True)
+        self.assertIn("pr", hysteresis.observe(active=set(), conclusive=False).retained)
+        self.assertNotIn("pr", hysteresis.observe(active=set(), conclusive=True).retained)
 
 
 class RunnerLabelManagerTests(unittest.TestCase):
@@ -407,11 +449,11 @@ class RunnerLabelManagerTests(unittest.TestCase):
         self.assertTrue(result.label_errors)
 
 
-class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
+class RunnerLabelManagerAddDelayTests(unittest.TestCase):
     """Policy tests for label addition under starvation delay."""
 
     def _apply_with_hysteresis(
-        self, hysteresis: StandbyLabelAddHysteresis
+        self, hysteresis: StandbyLabelHysteresis
     ) -> tuple[_FakeRunnerLabelApi, object]:
         api = _FakeRunnerLabelApi()
         runners = [_runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral"])]
@@ -419,25 +461,25 @@ class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
         result = manager.apply_policy(
             pending_jobs=_pending("pr"),
             busy_labels=_busy("pr", "bors"),
-            add_hysteresis=hysteresis,
+            hysteresis=hysteresis,
         )
         return api, result
 
     def test_label_not_added_before_threshold(self) -> None:
         """Starvation must reach the threshold before label is added."""
-        hysteresis = StandbyLabelAddHysteresis(threshold=2)
+        hysteresis = _hysteresis(add_threshold=2)
         api, result = self._apply_with_hysteresis(hysteresis)
         self.assertEqual(api.added, set())
 
     def test_label_added_at_threshold(self) -> None:
         """Label is added when starvation threshold is reached."""
-        hysteresis = StandbyLabelAddHysteresis(threshold=1)
+        hysteresis = _hysteresis(add_threshold=1)
         api, result = self._apply_with_hysteresis(hysteresis)
         self.assertEqual(api.added, {(501, "pr")})
 
     def test_threshold_reached_adds_only_ready_labels(self) -> None:
         """Only labels at threshold are added; others remain unlabeled."""
-        hysteresis = StandbyLabelAddHysteresis(threshold=2)
+        hysteresis = _hysteresis(add_threshold=2)
         api, result = self._apply_with_hysteresis(hysteresis)
         hysteresis.observe(active={"pr"}, conclusive=True)
         api, result = self._apply_with_hysteresis(hysteresis)
@@ -445,7 +487,7 @@ class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
 
     def test_starvation_restart_resets_count(self) -> None:
         """When starvation stops and restarts, the threshold delay applies again."""
-        hysteresis = StandbyLabelAddHysteresis(threshold=2)
+        hysteresis = _hysteresis(add_threshold=2)
         # Reach threshold
         api, result = self._apply_with_hysteresis(hysteresis)
         self.assertEqual(api.added, set())
@@ -458,7 +500,7 @@ class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
         manager.apply_policy(
             pending_jobs=_pending(),
             busy_labels=_busy(),
-            add_hysteresis=hysteresis,
+            hysteresis=hysteresis,
         )
         # Starvation restarts, so the count begins again at 1.
         api, result = self._apply_with_hysteresis(hysteresis)
@@ -476,7 +518,7 @@ class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
         manager.apply_policy(
             pending_jobs=_pending("pr"),
             busy_labels=_busy("pr", "bors"),
-            add_hysteresis=StandbyLabelAddHysteresis(threshold=10),
+            hysteresis=_hysteresis(add_threshold=10),
         )
         self.assertEqual(api.removed, set())
 
@@ -488,9 +530,60 @@ class RunnerLabelManagerAddHysteresisTests(unittest.TestCase):
         manager.apply_policy(
             pending_jobs=_pending(),
             busy_labels=_busy(),
-            add_hysteresis=StandbyLabelAddHysteresis(threshold=10),
+            hysteresis=_hysteresis(add_threshold=10),
         )
         self.assertEqual(api.removed, {(501, "pr")})
+
+
+class RunnerLabelManagerGracePeriodTests(unittest.TestCase):
+    """Policy tests for label removal under a grace period."""
+
+    def _apply(
+        self, hysteresis: StandbyLabelHysteresis
+    ) -> tuple[_FakeRunnerLabelApi, object]:
+        api = _FakeRunnerLabelApi()
+        runners = [_runner(501, "hoskinson1", busy=False, custom_labels=["ephemeral", "pr"])]
+        manager = RunnerLabelManager(payload=_payload(runners), api=api)
+        result = manager.apply_policy(
+            pending_jobs=_pending(), busy_labels=_busy(), hysteresis=hysteresis
+        )
+        return api, result
+
+    def test_label_is_kept_during_grace_and_removed_after_it(self) -> None:
+        """The label survives the first check and goes at the threshold."""
+        hysteresis = _hysteresis(keep_threshold=2)
+        api, result = self._apply(hysteresis)
+        self.assertEqual(api.removed, set())
+        self.assertIn("grace period", result.label_summary)
+        api, _ = self._apply(hysteresis)
+        self.assertEqual(api.removed, {(501, "pr")})
+
+    def test_grace_period_does_not_protect_specialty_labels(self) -> None:
+        """Only standby labels get a grace period; specialty labels go at once."""
+        api = _FakeRunnerLabelApi()
+        runners = [
+            _runner(502, "hoskinson2", busy=False, custom_labels=["doc-gen", "pr"]),
+        ]
+        manager = RunnerLabelManager(payload=_payload(runners), api=api)
+        manager.apply_policy(
+            pending_jobs=_pending(),
+            busy_labels=_busy(),
+            hysteresis=_hysteresis(keep_threshold=10),
+        )
+        self.assertEqual(api.removed, {(502, "doc-gen")})
+
+    def test_starved_label_is_added_while_another_is_in_grace(self) -> None:
+        """The two sides of the delay are independent per label."""
+        api = _FakeRunnerLabelApi()
+        runners = [_runner(503, "hoskinson3", busy=False, custom_labels=["ephemeral", "bors"])]
+        manager = RunnerLabelManager(payload=_payload(runners), api=api)
+        manager.apply_policy(
+            pending_jobs=_pending("pr"),
+            busy_labels=_busy("pr"),
+            hysteresis=_hysteresis(add_threshold=1, keep_threshold=10),
+        )
+        self.assertEqual(api.added, {(503, "pr")})
+        self.assertEqual(api.removed, set())
 
 
 class RenderPendingLabelsTests(unittest.TestCase):

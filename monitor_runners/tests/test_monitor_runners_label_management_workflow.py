@@ -11,7 +11,13 @@ from unittest.mock import patch
 # Ensure package imports work when tests are discovered as top-level modules.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from monitor_runners.label_management import LabelManagementResult, PendingLabeledJobs
+from monitor_runners.label_management import (
+    ADD_ITERATIONS,
+    KEEP_ITERATIONS,
+    LabelManagementResult,
+    PendingLabeledJobs,
+    StandbyLabelHysteresis,
+)
 from monitor_runners.workflow import main
 
 
@@ -39,7 +45,7 @@ def _parse_github_output(path: Path) -> dict[str, str]:
     return result
 
 
-def _write_payload(path: Path) -> None:
+def _write_payload(path: Path, labels: tuple[str, ...] = ("bors", "pr")) -> None:
     """Write the minimal runners payload file used by CLI integration tests."""
     payload = {
         "total_count": 1,
@@ -50,10 +56,7 @@ def _write_payload(path: Path) -> None:
                 "status": "online",
                 "busy": False,
                 "os": "Linux",
-                "labels": [
-                    {"name": "bors", "type": "custom"},
-                    {"name": "pr", "type": "custom"},
-                ],
+                "labels": [{"name": label, "type": "custom"} for label in labels],
             }
         ],
     }
@@ -167,12 +170,55 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
         """Dry-run mode should prefix summary while keeping normal mutation wording.
 
         Scenario:
-        - command runs with `--dry-run true`.
-        - real label-management execution path is used.
+        - an idle runner carries the `doc-gen` specialty label, which has no
+          grace period.
+        - command runs with `--dry-run true` on the real execution path.
 
         Expected behavior:
         - summary is marked as a dry run.
         - summary still describes the would-be mutations.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            response_file = tmp_path / "runners_response.json"
+            output_file = tmp_path / "github_output.txt"
+            _write_payload(response_file, labels=("doc-gen",))
+
+            with patch(
+                "monitor_runners.label_management.PendingLabeledJobsClient.pending_labels",
+                return_value=PendingLabeledJobs(pending=frozenset(), check_failed=False),
+            ):
+                rc = main(
+                    [
+                        "manage-labels",
+                        "--token",
+                        "token",
+                        "--org",
+                        "leanprover-community",
+                        "--response-file",
+                        str(response_file),
+                        "--dry-run",
+                        "true",
+                        "--github-output",
+                        str(output_file),
+                    ]
+                )
+
+            self.assertEqual(rc, 0)
+            outputs = _parse_github_output(output_file)
+            summary = outputs.get("label_summary", "")
+            self.assertIn("Dry-run", summary)
+            self.assertIn("Removed `doc-gen` label from runner `hoskinson1`", summary)
+
+    def test_manage_labels_single_pass_keeps_standby_labels(self) -> None:
+        """The once-per-run step must leave the standby labels as they are.
+
+        Scenario:
+        - real label-management execution path, nothing pending.
+        - the default thresholds and one single check.
+
+        Expected behavior:
+        - no removal appears in the summary; the grace period is reported.
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -203,8 +249,8 @@ class WorkflowLabelManagementIntegrationTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             outputs = _parse_github_output(output_file)
             summary = outputs.get("label_summary", "")
-            self.assertIn("Dry-run", summary)
-            self.assertIn("hoskinson1", summary)
+            self.assertNotIn("Removed", summary)
+            self.assertIn("grace period", summary)
 
 
 class _FakeClock:
@@ -294,6 +340,14 @@ class WorkflowLabelLoopTests(unittest.TestCase):
         self.assertEqual(execute.call_count, 3)
         self.assertEqual(clock.sleeps, [30.0, 30.0])
         self.assertIs(execute.call_args.kwargs.get("dry_run"), True)
+
+        # All iterations share one hysteresis, so both delays continue across
+        # iterations of the same loop process.
+        instances = [call.kwargs.get("hysteresis") for call in execute.call_args_list]
+        self.assertIsInstance(instances[0], StandbyLabelHysteresis)
+        self.assertEqual(instances[0].add_threshold, ADD_ITERATIONS)
+        self.assertEqual(instances[0].keep_threshold, KEEP_ITERATIONS)
+        self.assertTrue(all(instance is instances[0] for instance in instances))
 
     def test_label_loop_skips_iteration_on_fetch_failure(self) -> None:
         """A failed payload fetch should skip label management but keep looping.
