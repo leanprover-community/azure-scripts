@@ -37,6 +37,13 @@ MAX_RUNS_TO_INSPECT = 20
 # 5 minutes.
 ADD_ITERATIONS = 10
 
+# Consecutive clear checks needed before a standby label is removed. One
+# removes the label at the first check that finds the starvation over, which
+# sends the traffic back to the burst runners as soon as the queue drains. A
+# queue that starves intermittently then waits another ADD_ITERATIONS delay
+# for its label, so raise this value to hold the label through those gaps.
+KEEP_ITERATIONS = 1
+
 
 @dataclass
 class LabelManagementResult:
@@ -185,37 +192,66 @@ def render_busy_labels(busy_labels: frozenset[str]) -> str:
     return ",".join(sorted(busy_labels)) or "none"
 
 
-class StandbyLabelAddHysteresis:
-    """Delays standby label addition until starvation persists.
+@dataclass(frozen=True)
+class StandbyLabelDecision:
+    """Which standby labels the policy may add, and which it must keep.
 
-    A label becomes ready to add only after `threshold` consecutive checks
-    find it starved. The label loop keeps one instance for the whole
-    process, so the count continues across iterations.
-
-    A new instance starts each count at zero. A conclusive check that finds
-    the label starved increments its count. An inconclusive check (an
-    incomplete pending-jobs check) leaves the count as it is, because it
-    cannot prove starvation. A check that finds no starvation resets the
-    count to zero.
+    `ready` holds the labels that reached the add threshold. `retained`
+    holds the labels that are no longer starved but are still inside their
+    grace period.
     """
 
-    def __init__(self, threshold: int, labels: tuple[str, ...] = STANDBY_LABELS) -> None:
-        self.threshold = threshold
-        self._add_counts = {label: 0 for label in labels}
+    ready: frozenset[str]
+    retained: frozenset[str]
 
-    def observe(self, active: set[str], conclusive: bool) -> frozenset[str]:
-        """Record one check and return the labels that are ready to add."""
+
+class StandbyLabelHysteresis:
+    """Delays standby label addition and removal.
+
+    A label becomes ready to add only after `add_threshold` consecutive
+    checks find it starved. A label that stops being starved stays in place
+    for `keep_threshold` more checks. The label loop keeps one instance for
+    the whole process, so both counts continue across iterations.
+
+    A new instance starts both counts at zero, so one check alone advances
+    a count to one. A threshold of one therefore acts on that check, and a
+    higher threshold holds the label where it is.
+
+    A conclusive check advances the count that matches what it found and
+    resets the other. An inconclusive check (an incomplete pending-jobs
+    check) leaves both counts as they are, because it can prove neither
+    that starvation started nor that it stopped.
+    """
+
+    def __init__(
+        self,
+        add_threshold: int,
+        keep_threshold: int,
+        labels: tuple[str, ...] = STANDBY_LABELS,
+    ) -> None:
+        self.add_threshold = add_threshold
+        self.keep_threshold = keep_threshold
+        self._starved_counts = {label: 0 for label in labels}
+        self._clear_counts = {label: 0 for label in labels}
+
+    def observe(self, active: set[str], conclusive: bool) -> StandbyLabelDecision:
+        """Record one check and return the add and keep decision."""
         ready: set[str] = set()
-        for label, count in self._add_counts.items():
+        retained: set[str] = set()
+        for label in self._starved_counts:
             if label in active:
                 if conclusive:
-                    count += 1
-                    self._add_counts[label] = count
-                if count >= self.threshold:
+                    self._starved_counts[label] += 1
+                    self._clear_counts[label] = 0
+                if self._starved_counts[label] >= self.add_threshold:
                     ready.add(label)
             else:
-                self._add_counts[label] = 0
-        return frozenset(ready)
+                if conclusive:
+                    self._clear_counts[label] += 1
+                    self._starved_counts[label] = 0
+                if self._clear_counts[label] < self.keep_threshold:
+                    retained.add(label)
+        return StandbyLabelDecision(ready=frozenset(ready), retained=frozenset(retained))
 
 
 class RunnerLabelApi:
@@ -291,13 +327,15 @@ class RunnerLabelManager:
     [Phase 1] Add each ready label to every idle online hoskinson runner
        that lacks it, so the starved queue gets standby capacity. Every
        active label is ready at once, unless an optional hysteresis holds it
-       back until starvation lasts `threshold` consecutive checks.
+       back until starvation lasts `add_threshold` consecutive checks.
        |
        v
-    [Phase 2] Remove every non-active routing label from every idle
+    [Phase 2] Remove every unprotected routing label from every idle
        hoskinson runner, which returns the standby pool to its unlabeled
-       baseline. Idle offline runners are stripped too. Removal keys on
-       `active` alone, so a label stays only while its queue is starved.
+       baseline. Idle offline runners are stripped too. A starved queue
+       protects its label, and an optional hysteresis keeps that label for
+       `keep_threshold` clear checks afterwards. Only a standby label is
+       ever protected: the specialty labels always go.
 
     When the pending-jobs check is incomplete, labels found pending are still
     added (Phase 1); Phase 2 is skipped entirely, because a label missing from
@@ -305,7 +343,8 @@ class RunnerLabelManager:
 
     Notes
     -----
-    - Snapshot-based: no internal cross-run state.
+    - Snapshot-based: no internal cross-run state. The caller-owned
+      hysteresis holds the starved and clear counts.
     - Busy runners are never mutated. Runners are ephemeral: a busy runner
       deregisters after its job and its replacement registers unlabeled.
     - Runners carrying the `cleanup-soon` drain label are never mutated.
@@ -373,21 +412,21 @@ class RunnerLabelManager:
                 if label not in self._custom_labels(runner):
                     self._add_label(runner, label)
 
-    def _remove_inactive_labels(self, active: set[str]) -> None:
-        """Strip non-active routing labels from idle runners."""
+    def _remove_unprotected_labels(self, protected: set[str]) -> None:
+        """Strip unprotected routing labels from idle runners."""
         for runner in self.runners:
             if not self._is_idle(runner) or self._is_draining(runner):
                 continue
             custom_labels = self._custom_labels(runner)
             for label in ROUTING_LABELS:
-                if label in custom_labels and label not in active:
+                if label in custom_labels and label not in protected:
                     self._remove_label(runner, label)
 
     def apply_policy(
         self,
         pending_jobs: PendingLabeledJobs,
         busy_labels: frozenset[str],
-        add_hysteresis: StandbyLabelAddHysteresis | None = None,
+        hysteresis: StandbyLabelHysteresis | None = None,
     ) -> LabelManagementResult:
         """Execute the standby label policy and return summarized outputs."""
         pending_text = render_pending_labels(pending_jobs)
@@ -402,13 +441,12 @@ class RunnerLabelManager:
             )
 
         active = set(STANDBY_LABELS).intersection(pending_jobs.pending, busy_labels)
-        ready: frozenset[str]
-        if add_hysteresis is not None:
-            ready = add_hysteresis.observe(
+        if hysteresis is not None:
+            decision = hysteresis.observe(
                 active=active, conclusive=not pending_jobs.check_failed
             )
         else:
-            ready = frozenset(active)
+            decision = StandbyLabelDecision(ready=frozenset(active), retained=frozenset())
 
         self._add_summary(f"Busy fleet labels: {busy_text}; queued labels: {pending_text}")
         if active:
@@ -416,20 +454,23 @@ class RunnerLabelManager:
             self._add_summary(f"Standby labels active: {active_text}")
         else:
             self._add_summary("No starved standby label; standby stays unlabeled")
-        if ready and ready != active:
-            ready_text = ", ".join(f"`{label}`" for label in sorted(ready))
+        if decision.ready and decision.ready != active:
+            ready_text = ", ".join(f"`{label}`" for label in sorted(decision.ready))
             self._add_summary(f"Standby labels ready to add: {ready_text}")
+        if decision.retained:
+            retained_text = ", ".join(f"`{label}`" for label in sorted(decision.retained))
+            self._add_summary(f"Standby labels in removal grace period: {retained_text}")
 
-        self._add_ready_labels(ready)
+        self._add_ready_labels(decision.ready)
         if pending_jobs.check_failed:
             self._add_error(
                 "**Label Management Error:** pending-jobs check incomplete; "
                 "left non-active labels in place"
             )
         else:
-            # Removal keys on `active`, not `ready`: the hysteresis delays
-            # additions only.
-            self._remove_inactive_labels(active)
+            # A starved queue protects its own label whatever the add count
+            # says, so the two sides of the delay stay independent.
+            self._remove_unprotected_labels(active | decision.retained)
 
         return LabelManagementResult(
             pending_labels=pending_text,
@@ -445,7 +486,7 @@ def execute_label_management(
     token: str,
     dry_run: bool,
     labeled_jobs_repos: tuple[str, ...] = LABELED_JOBS_REPOS,
-    add_hysteresis: StandbyLabelAddHysteresis | None = None,
+    hysteresis: StandbyLabelHysteresis | None = None,
 ) -> LabelManagementResult:
     """Run queue-aware standby label management for one runners payload."""
     pending_jobs = PendingLabeledJobsClient(
@@ -456,7 +497,7 @@ def execute_label_management(
     result = manager.apply_policy(
         pending_jobs=pending_jobs,
         busy_labels=busy_fleet_labels(payload),
-        add_hysteresis=add_hysteresis,
+        hysteresis=hysteresis,
     )
     if dry_run:
         if result.label_summary:

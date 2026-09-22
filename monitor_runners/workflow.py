@@ -24,9 +24,10 @@ from .core import process_monitoring_run
 from .constants import host_for_name
 from .label_management import (
     ADD_ITERATIONS,
+    KEEP_ITERATIONS,
     LABELED_JOBS_REPOS,
     LabelManagementResult,
-    StandbyLabelAddHysteresis,
+    StandbyLabelHysteresis,
     execute_label_management,
 )
 from .models import GitHubRunnersPayload, MonitorState, MonitorStats
@@ -240,17 +241,21 @@ def _run_manage_labels(args: argparse.Namespace) -> int:
         repo.strip() for repo in args.labeled_jobs_repos.split(",") if repo.strip()
     )
     payload = GitHubRunnersPayload.from_dict(_load_json_file(args.response_file))
-    # A fresh hysteresis counts one check here, which stays below
-    # ADD_ITERATIONS, so this once-per-run step only removes labels. The label
-    # loop holds its counts across iterations and does the additions.
-    add_hysteresis = StandbyLabelAddHysteresis(threshold=ADD_ITERATIONS)
+    # A fresh hysteresis counts one check here, which stays below the add
+    # threshold, so this once-per-run step never adds a standby label; the
+    # label loop holds its counts across iterations and does that. The step
+    # does remove a standby label while KEEP_ITERATIONS is one, and it always
+    # strips the specialty labels.
+    hysteresis = StandbyLabelHysteresis(
+        add_threshold=ADD_ITERATIONS, keep_threshold=KEEP_ITERATIONS
+    )
     result = execute_label_management(
         payload=payload,
         org=args.org,
         token=args.token,
         dry_run=dry_run,
         labeled_jobs_repos=labeled_jobs_repos,
-        add_hysteresis=add_hysteresis,
+        hysteresis=hysteresis,
     )
     print(f"Pending standby labels: {result.pending_labels}")
     print(f"Busy fleet labels: {result.busy_labels}")
@@ -271,9 +276,10 @@ def _run_label_loop(args: argparse.Namespace) -> int:
     lifetime (1 hour) so a run never keeps mutating labels with a token that
     is about to expire when scheduled runs stop arriving.
 
-    All iterations share one ``StandbyLabelAddHysteresis``. It holds a standby
+    All iterations share one ``StandbyLabelHysteresis``. It holds a standby
     label back until ``--add-iterations`` consecutive iterations find that
-    label starved.
+    label starved, and then keeps the label for ``--keep-iterations``
+    iterations after starvation stops.
     """
     dry_run = _to_bool(args.dry_run)
     if dry_run:
@@ -282,7 +288,9 @@ def _run_label_loop(args: argparse.Namespace) -> int:
     labeled_jobs_repos = tuple(
         repo.strip() for repo in args.labeled_jobs_repos.split(",") if repo.strip()
     )
-    add_hysteresis = StandbyLabelAddHysteresis(threshold=args.add_iterations)
+    hysteresis = StandbyLabelHysteresis(
+        add_threshold=args.add_iterations, keep_threshold=args.keep_iterations
+    )
     interval = args.interval_seconds
     deadline = _utc_now() + timedelta(seconds=args.max_seconds)
 
@@ -307,7 +315,7 @@ def _run_label_loop(args: argparse.Namespace) -> int:
                     token=args.token,
                     dry_run=dry_run,
                     labeled_jobs_repos=labeled_jobs_repos,
-                    add_hysteresis=add_hysteresis,
+                    hysteresis=hysteresis,
                 )
                 print(f"[label-loop] pending standby labels: {result.pending_labels}", flush=True)
                 print(f"[label-loop] busy fleet labels: {result.busy_labels}", flush=True)
@@ -374,6 +382,7 @@ def _build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--interval-seconds", type=float, default=30.0)
     loop.add_argument("--max-seconds", type=float, default=2700.0)
     loop.add_argument("--add-iterations", type=int, default=ADD_ITERATIONS)
+    loop.add_argument("--keep-iterations", type=int, default=KEEP_ITERATIONS)
     return parser
 
 
