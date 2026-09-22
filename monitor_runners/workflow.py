@@ -244,10 +244,10 @@ def _run_manage_labels(args: argparse.Namespace) -> int:
     # A fresh hysteresis counts one check here, which stays below the add
     # threshold, so this once-per-run step never adds a standby label; the
     # label loop holds its counts across iterations and does that. The step
-    # does remove a standby label while KEEP_ITERATIONS is one, and it always
+    # does remove a standby label while the keep threshold is one, and it
     # strips the specialty labels.
     hysteresis = StandbyLabelHysteresis(
-        add_threshold=ADD_ITERATIONS, keep_threshold=KEEP_ITERATIONS
+        add_threshold=args.add_iterations, keep_threshold=args.keep_iterations
     )
     result = execute_label_management(
         payload=payload,
@@ -370,6 +370,8 @@ def _build_parser() -> argparse.ArgumentParser:
     manage.add_argument("--response-file", default="runners_response.json")
     manage.add_argument("--dry-run", default="false")
     manage.add_argument("--labeled-jobs-repos", default=",".join(LABELED_JOBS_REPOS))
+    manage.add_argument("--add-iterations", type=int, default=ADD_ITERATIONS)
+    manage.add_argument("--keep-iterations", type=int, default=KEEP_ITERATIONS)
     manage.add_argument(
         "--github-output", default=os.environ.get("GITHUB_OUTPUT", "")
     )

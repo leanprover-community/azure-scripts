@@ -87,12 +87,13 @@ jobs:
       # runner only when every online non-hoskinson runner that carries that
       # label is busy and a queued job requests it
       # (leanprover-community/docker, github-runner-app/README.md
-      # "Runner labels"). A standby label waits for 10 consecutive checks
-      # before it is added, counted within one process, so this single-check
-      # step never adds one; the label-management-loop job below holds the
-      # counts and does that. Removal waits for nothing at present, so this
-      # step does remove a standby label once its queue is no longer starved.
-      # It also strips the specialty labels.
+      # "Runner labels"). The repo variables STANDBY_LABEL_ADD_ITERATIONS and
+      # STANDBY_LABEL_KEEP_ITERATIONS set the two waits. A standby label waits
+      # 10 consecutive checks before it is added, counted within one process,
+      # so this single-check step never adds one; the label-management-loop
+      # job below holds the counts and does that. Removal waits for nothing at
+      # present, so this step does remove a standby label once its queue is no
+      # longer starved. It also strips the specialty labels.
       - name: Manage runner labels
         id: manage-labels
         if: steps.check-runners.outputs.api_ok == 'true'
@@ -102,6 +103,8 @@ jobs:
             --org "${{ github.repository_owner }}" \
             --response-file "runners_response.json" \
             --dry-run "${{ env.DRY_RUN }}" \
+            --add-iterations "${{ vars.STANDBY_LABEL_ADD_ITERATIONS || '10' }}" \
+            --keep-iterations "${{ vars.STANDBY_LABEL_KEEP_ITERATIONS || '1' }}" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Generate stats report
@@ -335,7 +338,9 @@ jobs:
             --org "${{ github.repository_owner }}" \
             --dry-run "${{ env.DRY_RUN }}" \
             --interval-seconds 30 \
-            --max-seconds 2700
+            --max-seconds 2700 \
+            --add-iterations "${{ vars.STANDBY_LABEL_ADD_ITERATIONS || '10' }}" \
+            --keep-iterations "${{ vars.STANDBY_LABEL_KEEP_ITERATIONS || '1' }}"
 
   workflow-keepalive:
     if: github.event_name == 'schedule'
